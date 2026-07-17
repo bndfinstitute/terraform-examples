@@ -1,0 +1,60 @@
+# Copyright IBM Corp. 2014, 2026
+# "SPDX-License-Identifier: MPL-2.0"
+
+name: Resource Counts
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 9 * * WED'
+
+permissions:
+  contents: write       # required to push commits
+  pull-requests: write  # required to create or update the automation pull request
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate Token
+        id: generate_token
+        uses: tibdex/github-app-token@3beb63f4bd073e61482598c45c71c1019b59b73a # v2.1.0
+        with:
+          app_id: ${{ secrets.APP_ID }}
+          installation_retrieval_mode: id
+          installation_retrieval_payload: ${{ secrets.INSTALLATION_ID }}
+          private_key: ${{secrets.APP_PEM }}
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - run: |
+          touch main.tf
+          cat << EOF > main.tf
+          terraform {
+          required_providers {
+          aws = {
+          source  = "hashicorp/aws"
+          }
+          }
+          }
+          EOF
+      - run: terraform init
+      - run: |
+          datasources=$(terraform providers schema -json | jq '.provider_schemas[] .data_source_schemas | length' | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')
+          ephemeralresources=$(terraform providers schema -json | jq '.provider_schemas[] .ephemeral_resource_schemas | length' | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')
+          listresources=$(terraform providers schema -json | jq '.provider_schemas[] .list_resource_schemas | length' | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')
+          resources=$(terraform providers schema -json | jq '.provider_schemas[] .resource_schemas | length' | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')
+          sed -r -i "s/With ([0-9,]+) resources, ([0-9,]+) ephemeral resources, ([0-9,]+) list resources and ([0-9,]+) data sources,/With $resources resources, $ephemeralresources ephemeral resources, $listresources list resources and $datasources data sources,/" website/docs/index.html.markdown
+      - run: |
+          rm main.tf
+          rm .terraform.lock.hcl
+          rm -rf .terraform
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.generate_token.outputs.token }}
+          branch: "resource-counts"
+          commit-message: "docs: update resource counts"
+          title: "docs: update resource counts"
+          body: "This PR updates the resource counts included on the provider documentation index page."

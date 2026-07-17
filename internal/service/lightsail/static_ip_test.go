@@ -1,0 +1,156 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+package lightsail_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/lightsail"
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-provider-aws/internal/acctest"
+	tflightsail "github.com/hashicorp/terraform-provider-aws/internal/service/lightsail"
+)
+
+func TestAccLightsailStaticIP_basic(t *testing.T) {
+	ctx := acctest.Context(t)
+	staticIpName := fmt.Sprintf("tf-test-lightsail-%s", acctest.RandString(t, 5))
+	resourceName := "aws_lightsail_static_ip.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); testAccPreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, strings.ToLower(lightsail.ServiceID)),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckStaticIPDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccStaticIPConfig_basic(staticIpName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckStaticIPExists(ctx, t, resourceName),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+		},
+	})
+}
+
+func TestAccLightsailStaticIP_disappears(t *testing.T) {
+	ctx := acctest.Context(t)
+	staticIpName := fmt.Sprintf("tf-test-lightsail-%s", acctest.RandString(t, 5))
+
+	staticIpDestroy := func(*terraform.State) error {
+		conn := acctest.ProviderMeta(ctx, t).LightsailClient(ctx)
+		_, err := conn.ReleaseStaticIp(ctx, &lightsail.ReleaseStaticIpInput{
+			StaticIpName: aws.String(staticIpName),
+		})
+
+		if err != nil {
+			return fmt.Errorf("Error deleting Lightsail Static IP in disapear test")
+		}
+
+		return nil
+	}
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); testAccPreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, strings.ToLower(lightsail.ServiceID)),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckStaticIPDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccStaticIPConfig_basic(staticIpName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckStaticIPExists(ctx, t, "aws_lightsail_static_ip.test"),
+					staticIpDestroy,
+				),
+				ExpectNonEmptyPlan: true,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("aws_lightsail_static_ip.test", plancheck.ResourceActionCreate),
+					},
+					PostApplyPostRefresh: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("aws_lightsail_static_ip.test", plancheck.ResourceActionCreate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func testAccCheckStaticIPExists(ctx context.Context, t *testing.T, n string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[n]
+		if !ok {
+			return fmt.Errorf("Not found: %s", n)
+		}
+
+		if rs.Primary.ID == "" {
+			return errors.New("No Lightsail Static IP ID is set")
+		}
+
+		conn := acctest.ProviderMeta(ctx, t).LightsailClient(ctx)
+
+		resp, err := conn.GetStaticIp(ctx, &lightsail.GetStaticIpInput{
+			StaticIpName: aws.String(rs.Primary.ID),
+		})
+
+		if err != nil {
+			return err
+		}
+
+		if resp == nil || resp.StaticIp == nil {
+			return fmt.Errorf("Static IP (%s) not found", rs.Primary.ID)
+		}
+
+		return nil
+	}
+}
+
+func testAccCheckStaticIPDestroy(ctx context.Context, t *testing.T) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		for _, rs := range s.RootModule().Resources {
+			if rs.Type != "aws_lightsail_static_ip" {
+				continue
+			}
+
+			conn := acctest.ProviderMeta(ctx, t).LightsailClient(ctx)
+
+			resp, err := conn.GetStaticIp(ctx, &lightsail.GetStaticIpInput{
+				StaticIpName: aws.String(rs.Primary.ID),
+			})
+
+			if tflightsail.IsANotFoundError(err) {
+				continue
+			}
+
+			if err == nil {
+				if resp.StaticIp != nil {
+					return fmt.Errorf("Lightsail Static IP %q still exists", rs.Primary.ID)
+				}
+			}
+
+			return err
+		}
+
+		return nil
+	}
+}
+
+func testAccStaticIPConfig_basic(staticIpName string) string {
+	return fmt.Sprintf(`
+resource "aws_lightsail_static_ip" "test" {
+  name = "%s"
+}
+`, staticIpName)
+}

@@ -1,0 +1,149 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+package ec2_test
+
+import (
+	"fmt"
+	"testing"
+
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-provider-aws/internal/acctest"
+	tfec2 "github.com/hashicorp/terraform-provider-aws/internal/service/ec2"
+	"github.com/hashicorp/terraform-provider-aws/names"
+)
+
+func TestAccEC2Tag_basic(t *testing.T) {
+	ctx := acctest.Context(t)
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	rBgpAsn := acctest.RandIntRange(t, 64512, 65534)
+	resourceName := "aws_ec2_tag.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); testAccPreCheckTransitGateway(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.EC2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckTagDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccTagConfig_basic(rName, rBgpAsn, acctest.CtKey1, acctest.CtValue1),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckTagExists(ctx, t, resourceName),
+					resource.TestCheckResourceAttr(resourceName, names.AttrKey, acctest.CtKey1),
+					resource.TestCheckResourceAttr(resourceName, names.AttrValue, acctest.CtValue1),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+		},
+	})
+}
+
+func TestAccEC2Tag_disappears(t *testing.T) {
+	ctx := acctest.Context(t)
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	rBgpAsn := acctest.RandIntRange(t, 64512, 65534)
+	resourceName := "aws_ec2_tag.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); testAccPreCheckTransitGateway(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.EC2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckTagDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccTagConfig_basic(rName, rBgpAsn, acctest.CtKey1, acctest.CtValue1),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckTagExists(ctx, t, resourceName),
+					acctest.CheckSDKResourceDisappears(ctx, t, tfec2.ResourceTag(), resourceName),
+				),
+				ExpectNonEmptyPlan: true,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+					PostApplyPostRefresh: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccEC2Tag_value(t *testing.T) {
+	ctx := acctest.Context(t)
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	rBgpAsn := acctest.RandIntRange(t, 64512, 65534)
+	resourceName := "aws_ec2_tag.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); testAccPreCheckTransitGateway(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.EC2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckTagDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccTagConfig_basic(rName, rBgpAsn, acctest.CtKey1, acctest.CtValue1),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckTagExists(ctx, t, resourceName),
+					resource.TestCheckResourceAttr(resourceName, names.AttrKey, acctest.CtKey1),
+					resource.TestCheckResourceAttr(resourceName, names.AttrValue, acctest.CtValue1),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccTagConfig_basic(rName, rBgpAsn, acctest.CtKey1, acctest.CtValue1Updated),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckTagExists(ctx, t, resourceName),
+					resource.TestCheckResourceAttr(resourceName, names.AttrKey, acctest.CtKey1),
+					resource.TestCheckResourceAttr(resourceName, names.AttrValue, acctest.CtValue1Updated),
+				),
+			},
+		},
+	})
+}
+
+func testAccTagConfig_basic(rName string, rBgpAsn int, key, value string) string {
+	return fmt.Sprintf(`
+resource "aws_ec2_transit_gateway" "test" {
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_customer_gateway" "test" {
+  bgp_asn    = %[2]d
+  ip_address = "172.0.0.1"
+  type       = "ipsec.1"
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_vpn_connection" "test" {
+  customer_gateway_id = aws_customer_gateway.test.id
+  transit_gateway_id  = aws_ec2_transit_gateway.test.id
+  type                = aws_customer_gateway.test.type
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_ec2_tag" "test" {
+  resource_id = aws_vpn_connection.test.transit_gateway_attachment_id
+  key         = %[3]q
+  value       = %[4]q
+}
+`, rName, rBgpAsn, key, value)
+}

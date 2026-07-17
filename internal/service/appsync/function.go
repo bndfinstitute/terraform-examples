@@ -1,0 +1,475 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+// DONOTCOPY: Copying old resources spreads bad habits. Use skaff instead.
+
+package appsync
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strings"
+
+	"github.com/YakDriver/regexache"
+	"github.com/YakDriver/smarterr"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/appsync"
+	awstypes "github.com/aws/aws-sdk-go-v2/service/appsync/types"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
+	"github.com/hashicorp/terraform-provider-aws/internal/conns"
+	"github.com/hashicorp/terraform-provider-aws/internal/enum"
+	"github.com/hashicorp/terraform-provider-aws/internal/errs"
+	"github.com/hashicorp/terraform-provider-aws/internal/errs/sdkdiag"
+	"github.com/hashicorp/terraform-provider-aws/internal/retry"
+	"github.com/hashicorp/terraform-provider-aws/internal/smerr"
+	"github.com/hashicorp/terraform-provider-aws/internal/tfresource"
+	"github.com/hashicorp/terraform-provider-aws/internal/verify"
+	"github.com/hashicorp/terraform-provider-aws/names"
+)
+
+const (
+	functionVersion2018_05_29 = "2018-05-29"
+)
+
+// @SDKResource("aws_appsync_function", name="Function")
+func resourceFunction() *schema.Resource {
+	return &schema.Resource{
+		CreateWithoutTimeout: resourceFunctionCreate,
+		ReadWithoutTimeout:   resourceFunctionRead,
+		UpdateWithoutTimeout: resourceFunctionUpdate,
+		DeleteWithoutTimeout: resourceFunctionDelete,
+
+		Importer: &schema.ResourceImporter{
+			StateContext: schema.ImportStatePassthroughContext,
+		},
+
+		SchemaFunc: func() map[string]*schema.Schema {
+			return map[string]*schema.Schema{
+				"api_id": {
+					Type:     schema.TypeString,
+					Required: true,
+					ForceNew: true,
+				},
+				names.AttrARN: {
+					Type:     schema.TypeString,
+					Computed: true,
+				},
+				"code": {
+					Type:         schema.TypeString,
+					Optional:     true,
+					RequiredWith: []string{"runtime"},
+					ValidateFunc: validation.StringLenBetween(1, 32768),
+				},
+				"data_source": {
+					Type:     schema.TypeString,
+					Required: true,
+				},
+				names.AttrDescription: {
+					Type:     schema.TypeString,
+					Optional: true,
+				},
+				"function_id": {
+					Type:     schema.TypeString,
+					Computed: true,
+				},
+				"function_version": {
+					Type:     schema.TypeString,
+					Optional: true,
+					Computed: true,
+					ValidateFunc: validation.StringInSlice([]string{
+						functionVersion2018_05_29,
+					}, true),
+				},
+				"max_batch_size": {
+					Type:         schema.TypeInt,
+					Optional:     true,
+					ValidateFunc: validation.IntBetween(0, 2000),
+				},
+				names.AttrName: {
+					Type:         schema.TypeString,
+					Required:     true,
+					ValidateFunc: validation.StringMatch(regexache.MustCompile(`[A-Za-z_][0-9A-Za-z_]*`), "must match [A-Za-z_][0-9A-Za-z_]*"),
+				},
+				"request_mapping_template": {
+					Type:     schema.TypeString,
+					Optional: true,
+				},
+				"response_mapping_template": {
+					Type:     schema.TypeString,
+					Optional: true,
+				},
+				"runtime": {
+					Type:         schema.TypeList,
+					Optional:     true,
+					MaxItems:     1,
+					RequiredWith: []string{"code"},
+					Elem: &schema.Resource{
+						Schema: map[string]*schema.Schema{
+							names.AttrName: {
+								Type:             schema.TypeString,
+								Required:         true,
+								ValidateDiagFunc: enum.Validate[awstypes.RuntimeName](),
+							},
+							"runtime_version": {
+								Type:     schema.TypeString,
+								Required: true,
+							},
+						},
+					},
+				},
+				"sync_config": {
+					Type:     schema.TypeList,
+					Optional: true,
+					MaxItems: 1,
+					Elem: &schema.Resource{
+						Schema: map[string]*schema.Schema{
+							"conflict_detection": {
+								Type:             schema.TypeString,
+								Optional:         true,
+								ValidateDiagFunc: enum.Validate[awstypes.ConflictDetectionType](),
+							},
+							"conflict_handler": {
+								Type:             schema.TypeString,
+								Optional:         true,
+								ValidateDiagFunc: enum.Validate[awstypes.ConflictHandlerType](),
+							},
+							"lambda_conflict_handler_config": {
+								Type:     schema.TypeList,
+								Optional: true,
+								MaxItems: 1,
+								Elem: &schema.Resource{
+									Schema: map[string]*schema.Schema{
+										"lambda_conflict_handler_arn": {
+											Type:         schema.TypeString,
+											Optional:     true,
+											ValidateFunc: verify.ValidARN,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+		},
+	}
+}
+
+func resourceFunctionCreate(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
+	var diags diag.Diagnostics
+	conn := meta.(*conns.AWSClient).AppSyncClient(ctx)
+
+	apiID := d.Get("api_id").(string)
+	name := d.Get(names.AttrName).(string)
+	input := &appsync.CreateFunctionInput{
+		ApiId:           aws.String(apiID),
+		DataSourceName:  aws.String(d.Get("data_source").(string)),
+		FunctionVersion: aws.String(d.Get("function_version").(string)),
+		Name:            aws.String(name),
+	}
+
+	if v, ok := d.GetOk("code"); ok {
+		input.Code = aws.String(v.(string))
+	}
+
+	if v, ok := d.GetOk(names.AttrDescription); ok {
+		input.Description = aws.String(v.(string))
+	}
+
+	if v, ok := d.GetOk("max_batch_size"); ok {
+		input.MaxBatchSize = int32(v.(int))
+	}
+
+	if v, ok := d.GetOk("request_mapping_template"); ok {
+		input.RequestMappingTemplate = aws.String(v.(string))
+		input.FunctionVersion = aws.String(functionVersion2018_05_29)
+	}
+
+	if v, ok := d.GetOk("response_mapping_template"); ok {
+		input.ResponseMappingTemplate = aws.String(v.(string))
+	}
+
+	if v, ok := d.GetOk("runtime"); ok && len(v.([]any)) > 0 {
+		input.Runtime = expandRuntime(v.([]any))
+	}
+
+	if v, ok := d.GetOk("sync_config"); ok && len(v.([]any)) > 0 {
+		input.SyncConfig = expandSyncConfig(v.([]any))
+	}
+
+	output, err := conn.CreateFunction(ctx, input)
+
+	if err != nil {
+		return smerr.Append(ctx, diags, err)
+	}
+
+	d.SetId(functionCreateResourceID(apiID, aws.ToString(output.FunctionConfiguration.FunctionId)))
+
+	return smerr.AppendEnrich(ctx, diags, resourceFunctionRead(ctx, d, meta))
+}
+
+func resourceFunctionRead(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
+	var diags diag.Diagnostics
+	conn := meta.(*conns.AWSClient).AppSyncClient(ctx)
+
+	apiID, functionID, err := functionParseResourceID(d.Id())
+	if err != nil {
+		return smerr.Append(ctx, diags, err)
+	}
+
+	function, err := findFunctionByTwoPartKey(ctx, conn, apiID, functionID)
+
+	if !d.IsNewResource() && retry.NotFound(err) {
+		smerr.AppendOne(ctx, diags, sdkdiag.NewResourceNotFoundWarningDiagnostic(err), smerr.ID, d.Id())
+		d.SetId("")
+		return diags
+	}
+
+	if err != nil {
+		return smerr.Append(ctx, diags, err, smerr.ID, d.Id())
+	}
+
+	d.Set("api_id", apiID)
+	d.Set(names.AttrARN, function.FunctionArn)
+	d.Set("code", function.Code)
+	d.Set("data_source", function.DataSourceName)
+	d.Set(names.AttrDescription, function.Description)
+	d.Set("function_id", functionID)
+	d.Set("function_version", function.FunctionVersion)
+	d.Set("max_batch_size", function.MaxBatchSize)
+	d.Set(names.AttrName, function.Name)
+	d.Set("request_mapping_template", function.RequestMappingTemplate)
+	d.Set("response_mapping_template", function.ResponseMappingTemplate)
+	if err := d.Set("runtime", flattenRuntime(function.Runtime)); err != nil {
+		return smerr.Append(ctx, diags, err)
+	}
+	if err := d.Set("sync_config", flattenSyncConfig(function.SyncConfig)); err != nil {
+		return smerr.Append(ctx, diags, err)
+	}
+
+	return diags
+}
+
+func resourceFunctionUpdate(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
+	var diags diag.Diagnostics
+	conn := meta.(*conns.AWSClient).AppSyncClient(ctx)
+
+	apiID, functionID, err := functionParseResourceID(d.Id())
+	if err != nil {
+		return smerr.Append(ctx, diags, err)
+	}
+
+	input := &appsync.UpdateFunctionInput{
+		ApiId:           aws.String(apiID),
+		DataSourceName:  aws.String(d.Get("data_source").(string)),
+		FunctionId:      aws.String(functionID),
+		FunctionVersion: aws.String(d.Get("function_version").(string)),
+		Name:            aws.String(d.Get(names.AttrName).(string)),
+	}
+
+	if v, ok := d.GetOk("code"); ok {
+		input.Code = aws.String(v.(string))
+	}
+
+	if v, ok := d.GetOk(names.AttrDescription); ok {
+		input.Description = aws.String(v.(string))
+	}
+
+	if v, ok := d.GetOk("max_batch_size"); ok {
+		input.MaxBatchSize = int32(v.(int))
+	}
+
+	if v, ok := d.GetOk("request_mapping_template"); ok {
+		input.RequestMappingTemplate = aws.String(v.(string))
+	}
+
+	if v, ok := d.GetOk("response_mapping_template"); ok {
+		input.ResponseMappingTemplate = aws.String(v.(string))
+	}
+
+	if v, ok := d.GetOk("runtime"); ok && len(v.([]any)) > 0 {
+		input.Runtime = expandRuntime(v.([]any))
+	}
+
+	if v, ok := d.GetOk("sync_config"); ok && len(v.([]any)) > 0 {
+		input.SyncConfig = expandSyncConfig(v.([]any))
+	}
+
+	_, err = conn.UpdateFunction(ctx, input)
+
+	if err != nil {
+		return smerr.Append(ctx, diags, err, smerr.ID, d.Id())
+	}
+
+	return smerr.AppendEnrich(ctx, diags, resourceFunctionRead(ctx, d, meta))
+}
+
+func resourceFunctionDelete(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
+	var diags diag.Diagnostics
+	conn := meta.(*conns.AWSClient).AppSyncClient(ctx)
+
+	apiID, functionID, err := functionParseResourceID(d.Id())
+	if err != nil {
+		return smerr.Append(ctx, diags, err)
+	}
+
+	log.Printf("[INFO] Deleting Appsync Function: %s", d.Id())
+	input := appsync.DeleteFunctionInput{
+		ApiId:      aws.String(apiID),
+		FunctionId: aws.String(functionID),
+	}
+	_, err = conn.DeleteFunction(ctx, &input)
+
+	if errs.IsA[*awstypes.NotFoundException](err) {
+		return diags
+	}
+
+	if err != nil {
+		return smerr.Append(ctx, diags, err, smerr.ID, d.Id())
+	}
+
+	return diags
+}
+
+const functionResourceIDSeparator = "-"
+
+func functionCreateResourceID(apiID, functionID string) string {
+	parts := []string{apiID, functionID}
+	id := strings.Join(parts, functionResourceIDSeparator)
+
+	return id
+}
+
+func functionParseResourceID(id string) (string, string, error) {
+	parts := strings.SplitN(id, functionResourceIDSeparator, 2)
+
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", smarterr.NewError(fmt.Errorf("unexpected format for ID (%[1]s), expected API-ID%[2]sFUNCTION-ID", id, functionResourceIDSeparator))
+	}
+
+	return parts[0], parts[1], nil
+}
+
+func findFunctionByTwoPartKey(ctx context.Context, conn *appsync.Client, apiID, functionID string) (*awstypes.FunctionConfiguration, error) {
+	input := &appsync.GetFunctionInput{
+		ApiId:      aws.String(apiID),
+		FunctionId: aws.String(functionID),
+	}
+
+	output, err := conn.GetFunction(ctx, input)
+
+	if errs.IsA[*awstypes.NotFoundException](err) {
+		return nil, smarterr.NewError(&retry.NotFoundError{
+			LastError: err,
+		})
+	}
+
+	if err != nil {
+		return nil, smarterr.NewError(err)
+	}
+
+	if output == nil || output.FunctionConfiguration == nil {
+		return nil, smarterr.NewError(tfresource.NewEmptyResultError())
+	}
+
+	return output.FunctionConfiguration, nil
+}
+
+func expandRuntime(tfList []any) *awstypes.AppSyncRuntime {
+	if len(tfList) == 0 || tfList[0] == nil {
+		return nil
+	}
+
+	tfMap := tfList[0].(map[string]any)
+	apiObject := &awstypes.AppSyncRuntime{}
+
+	if v, ok := tfMap[names.AttrName].(string); ok {
+		apiObject.Name = awstypes.RuntimeName(v)
+	}
+
+	if v, ok := tfMap["runtime_version"].(string); ok {
+		apiObject.RuntimeVersion = aws.String(v)
+	}
+
+	return apiObject
+}
+
+func flattenRuntime(apiObject *awstypes.AppSyncRuntime) []any {
+	if apiObject == nil {
+		return nil
+	}
+
+	tfMap := map[string]any{
+		names.AttrName:    apiObject.Name,
+		"runtime_version": aws.ToString(apiObject.RuntimeVersion),
+	}
+
+	return []any{tfMap}
+}
+
+func expandSyncConfig(tfList []any) *awstypes.SyncConfig {
+	if len(tfList) == 0 || tfList[0] == nil {
+		return nil
+	}
+
+	tfMap := tfList[0].(map[string]any)
+	apiObject := &awstypes.SyncConfig{}
+
+	if v, ok := tfMap["conflict_detection"].(string); ok {
+		apiObject.ConflictDetection = awstypes.ConflictDetectionType(v)
+	}
+
+	if v, ok := tfMap["conflict_handler"].(string); ok {
+		apiObject.ConflictHandler = awstypes.ConflictHandlerType(v)
+	}
+
+	if v, ok := tfMap["lambda_conflict_handler_config"].([]any); ok && len(v) > 0 {
+		apiObject.LambdaConflictHandlerConfig = expandLambdaConflictHandlerConfig(v)
+	}
+
+	return apiObject
+}
+
+func flattenSyncConfig(apiObject *awstypes.SyncConfig) []any {
+	if apiObject == nil {
+		return nil
+	}
+
+	tfMap := map[string]any{
+		"conflict_detection":             apiObject.ConflictDetection,
+		"conflict_handler":               apiObject.ConflictHandler,
+		"lambda_conflict_handler_config": flattenLambdaConflictHandlerConfig(apiObject.LambdaConflictHandlerConfig),
+	}
+
+	return []any{tfMap}
+}
+
+func expandLambdaConflictHandlerConfig(tfList []any) *awstypes.LambdaConflictHandlerConfig {
+	if len(tfList) == 0 || tfList[0] == nil {
+		return nil
+	}
+
+	tfMap := tfList[0].(map[string]any)
+	apiObject := &awstypes.LambdaConflictHandlerConfig{}
+
+	if v, ok := tfMap["lambda_conflict_handler_arn"].(string); ok {
+		apiObject.LambdaConflictHandlerArn = aws.String(v)
+	}
+
+	return apiObject
+}
+
+func flattenLambdaConflictHandlerConfig(apiObject *awstypes.LambdaConflictHandlerConfig) []any {
+	if apiObject == nil {
+		return nil
+	}
+
+	tfMap := map[string]any{
+		"lambda_conflict_handler_arn": aws.ToString(apiObject.LambdaConflictHandlerArn),
+	}
+
+	return []any{tfMap}
+}

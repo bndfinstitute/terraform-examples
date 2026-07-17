@@ -1,0 +1,190 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+// DONOTCOPY: Copying old resources spreads bad habits. Use skaff instead.
+
+package ecs
+
+import (
+	"context"
+	"log"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ecs"
+	awstypes "github.com/aws/aws-sdk-go-v2/service/ecs/types"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
+	"github.com/hashicorp/terraform-provider-aws/internal/conns"
+	"github.com/hashicorp/terraform-provider-aws/internal/enum"
+	"github.com/hashicorp/terraform-provider-aws/internal/errs"
+	"github.com/hashicorp/terraform-provider-aws/internal/errs/sdkdiag"
+	"github.com/hashicorp/terraform-provider-aws/internal/retry"
+	tfslices "github.com/hashicorp/terraform-provider-aws/internal/slices"
+	"github.com/hashicorp/terraform-provider-aws/internal/tfresource"
+	"github.com/hashicorp/terraform-provider-aws/names"
+)
+
+// @SDKResource("aws_ecs_account_setting_default", name="Account Setting Default")
+func resourceAccountSettingDefault() *schema.Resource {
+	return &schema.Resource{
+		CreateWithoutTimeout: resourceAccountSettingDefaultPut,
+		ReadWithoutTimeout:   resourceAccountSettingDefaultRead,
+		UpdateWithoutTimeout: resourceAccountSettingDefaultPut,
+		DeleteWithoutTimeout: resourceAccountSettingDefaultDelete,
+
+		Importer: &schema.ResourceImporter{
+			StateContext: resourceAccountSettingDefaultImport,
+		},
+
+		SchemaFunc: func() map[string]*schema.Schema {
+			return map[string]*schema.Schema{
+				names.AttrName: {
+					Type:         schema.TypeString,
+					ForceNew:     true,
+					Required:     true,
+					ValidateFunc: validation.StringInSlice(settingName_Values(), false),
+				},
+				"principal_arn": {
+					Type:     schema.TypeString,
+					Computed: true,
+				},
+				names.AttrValue: {
+					Type:     schema.TypeString,
+					Required: true,
+				},
+			}
+		},
+	}
+}
+
+func resourceAccountSettingDefaultPut(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
+	var diags diag.Diagnostics
+	conn := meta.(*conns.AWSClient).ECSClient(ctx)
+
+	settingName := d.Get(names.AttrName).(string)
+	input := &ecs.PutAccountSettingDefaultInput{
+		Name:  awstypes.SettingName(settingName),
+		Value: aws.String(d.Get(names.AttrValue).(string)),
+	}
+
+	_, err := conn.PutAccountSettingDefault(ctx, input)
+	if err != nil {
+		return sdkdiag.AppendErrorf(diags, "putting ECS Account Setting Default (%s): %s", settingName, err)
+	}
+
+	d.SetId(settingName)
+
+	return append(diags, resourceAccountSettingDefaultRead(ctx, d, meta)...)
+}
+
+func resourceAccountSettingDefaultRead(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
+	var diags diag.Diagnostics
+	conn := meta.(*conns.AWSClient).ECSClient(ctx)
+
+	settingName := awstypes.SettingName(d.Get(names.AttrName).(string))
+	setting, err := findEffectiveAccountSettingByName(ctx, conn, settingName)
+
+	if !d.IsNewResource() && retry.NotFound(err) {
+		log.Printf("[WARN] ECS Account Setting Default (%s) not found, removing from state", settingName)
+		d.SetId("")
+		return diags
+	}
+
+	if err != nil {
+		return sdkdiag.AppendErrorf(diags, "reading ECS Account Setting Default (%s): %s", settingName, err)
+	}
+
+	d.Set(names.AttrName, setting.Name)
+	d.Set("principal_arn", setting.PrincipalArn)
+	d.Set(names.AttrValue, setting.Value)
+
+	return diags
+}
+
+func resourceAccountSettingDefaultDelete(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
+	var diags diag.Diagnostics
+	conn := meta.(*conns.AWSClient).ECSClient(ctx)
+
+	settingName := awstypes.SettingName(d.Get(names.AttrName).(string))
+	settingValue := "disabled"
+
+	// Default value: https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-maintenance.html#task-retirement-change.
+	if settingName == awstypes.SettingNameFargateTaskRetirementWaitPeriod {
+		const (
+			fargateTaskRetirementWaitPeriodValue = "7"
+		)
+		settingValue = fargateTaskRetirementWaitPeriodValue
+	}
+
+	if settingName == awstypes.SettingNameDefaultLogDriverMode {
+		const (
+			defaultLogDriverModeValue = "non-blocking"
+		)
+		settingValue = defaultLogDriverModeValue
+	}
+
+	log.Printf("[WARN] Deleting ECS Account Setting Default: %s", settingName)
+	input := &ecs.PutAccountSettingDefaultInput{
+		Name:  settingName,
+		Value: aws.String(settingValue),
+	}
+
+	_, err := conn.PutAccountSettingDefault(ctx, input)
+
+	if errs.IsAErrorMessageContains[*awstypes.InvalidParameterException](err, "You can no longer disable") {
+		return diags
+	}
+
+	if err != nil {
+		return sdkdiag.AppendErrorf(diags, "disabling ECS Account Setting Default (%s): %s", settingName, err)
+	}
+
+	return diags
+}
+
+func resourceAccountSettingDefaultImport(ctx context.Context, d *schema.ResourceData, meta any) ([]*schema.ResourceData, error) {
+	d.Set(names.AttrName, d.Id())
+
+	return []*schema.ResourceData{d}, nil
+}
+
+func findSetting(ctx context.Context, conn *ecs.Client, input *ecs.ListAccountSettingsInput) (*awstypes.Setting, error) {
+	output, err := findSettings(ctx, conn, input)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return tfresource.AssertSingleValueResult(output)
+}
+
+func findSettings(ctx context.Context, conn *ecs.Client, input *ecs.ListAccountSettingsInput) ([]awstypes.Setting, error) {
+	var output []awstypes.Setting
+
+	pages := ecs.NewListAccountSettingsPaginator(conn, input)
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+
+		if err != nil {
+			return nil, err
+		}
+
+		output = append(output, page.Settings...)
+	}
+
+	return output, nil
+}
+
+func findEffectiveAccountSettingByName(ctx context.Context, conn *ecs.Client, name awstypes.SettingName) (*awstypes.Setting, error) {
+	input := &ecs.ListAccountSettingsInput{
+		EffectiveSettings: true,
+		Name:              name,
+	}
+
+	return findSetting(ctx, conn, input)
+}
+
+func settingName_Values() []string {
+	return tfslices.AppendUnique(enum.Values[awstypes.SettingName](), "dualStackIPv6")
+}

@@ -1,0 +1,42 @@
+# Copyright IBM Corp. 2014, 2026
+# "SPDX-License-Identifier: MPL-2.0"
+
+name: Copyright Checks
+
+on:
+  push:
+    branches:
+      - main
+      - "release/**"
+  pull_request:
+    paths-ignore:
+      - .ci/**
+      - .github/**
+      - .teamcity/**
+      - .release/**
+      - infrastructure/repository/labels-service.tf
+
+## NOTE: !!!
+## When changing these workflows, ensure that the following is updated:
+##   - Documentation: docs/continuous-integration.md
+##   - Documentation: docs/makefile-cheat-sheet.md
+##   - Makefile: ./GNUmakefile
+
+permissions:
+  contents: read # required for checkout
+
+jobs:
+  copyplop:
+    name: headers check
+    runs-on: custom-ubuntu-22.04-medium
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go install github.com/YakDriver/copyplop@latest
+      - run: copyplop check
+      - name: Check for Git Differences
+        run: |
+          git diff --compact-summary --exit-code || \
+            (echo; echo "Unexpected difference in directories after adding copyright headers. Run 'copyplop fix' command and commit."; exit 1)

@@ -1,0 +1,69 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+package ec2_test
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-provider-aws/internal/acctest"
+	"github.com/hashicorp/terraform-provider-aws/names"
+)
+
+func testAccEBSEncryptionByDefaultDataSource_basic(t *testing.T) {
+	ctx := acctest.Context(t)
+
+	acctest.Test(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.EC2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccEBSEncryptionByDefaultDataSourceConfig_basic,
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckEBSEncryptionByDefaultDataSource(ctx, t, "data.aws_ebs_encryption_by_default.current"),
+				),
+			},
+		},
+	})
+}
+
+func testAccCheckEBSEncryptionByDefaultDataSource(ctx context.Context, t *testing.T, n string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		conn := acctest.ProviderMeta(ctx, t).EC2Client(ctx)
+
+		rs, ok := s.RootModule().Resources[n]
+		if !ok {
+			return fmt.Errorf("Not found: %s", n)
+		}
+
+		if rs.Primary.ID == "" {
+			return fmt.Errorf("No ID is set")
+		}
+
+		input := ec2.GetEbsEncryptionByDefaultInput{}
+		actual, err := conn.GetEbsEncryptionByDefault(ctx, &input)
+		if err != nil {
+			return err
+		}
+
+		attr, _ := strconv.ParseBool(rs.Primary.Attributes[names.AttrEnabled])
+
+		if attr != aws.ToBool(actual.EbsEncryptionByDefault) {
+			return fmt.Errorf("EBS encryption by default is not in expected state (%t)", aws.ToBool(actual.EbsEncryptionByDefault))
+		}
+
+		return nil
+	}
+}
+
+const testAccEBSEncryptionByDefaultDataSourceConfig_basic = `
+data "aws_ebs_encryption_by_default" "current" {}
+`

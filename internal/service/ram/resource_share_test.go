@@ -1,0 +1,324 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+package ram_test
+
+import (
+	"context"
+	"fmt"
+	"testing"
+
+	"github.com/YakDriver/regexache"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awstypes "github.com/aws/aws-sdk-go-v2/service/ram/types"
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-provider-aws/internal/acctest"
+	"github.com/hashicorp/terraform-provider-aws/internal/retry"
+	tfram "github.com/hashicorp/terraform-provider-aws/internal/service/ram"
+	"github.com/hashicorp/terraform-provider-aws/names"
+)
+
+func TestAccRAMResourceShare_basic(t *testing.T) {
+	ctx := acctest.Context(t)
+	var resourceShare awstypes.ResourceShare
+	resourceName := "aws_ram_resource_share.test"
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.RAMServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckResourceShareDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccResourceShareConfig_name(rName),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckResourceShareExists(ctx, t, resourceName, &resourceShare),
+					acctest.MatchResourceAttrRegionalARN(ctx, resourceName, names.AttrARN, "ram", regexache.MustCompile(`resource-share/.+`)),
+					resource.TestCheckResourceAttr(resourceName, "allow_external_principals", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, names.AttrName, rName),
+					resource.TestCheckResourceAttr(resourceName, "permission_arns.#", "0"),
+					resource.TestCheckResourceAttr(resourceName, acctest.CtTagsPercent, "0"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+		},
+	})
+}
+
+func TestAccRAMResourceShare_permission(t *testing.T) {
+	ctx := acctest.Context(t)
+	var resourceShare awstypes.ResourceShare
+	resourceName := "aws_ram_resource_share.test"
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.RAMServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckResourceShareDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccResourceShareConfig_namePermission(rName),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckResourceShareExists(ctx, t, resourceName, &resourceShare),
+					acctest.MatchResourceAttrRegionalARN(ctx, resourceName, names.AttrARN, "ram", regexache.MustCompile(`resource-share/.+`)),
+					resource.TestCheckResourceAttr(resourceName, "allow_external_principals", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, names.AttrName, rName),
+					resource.TestCheckResourceAttr(resourceName, "permission_arns.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, acctest.CtTagsPercent, "0"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+		},
+	})
+}
+
+func TestAccRAMResourceShare_allowExternalPrincipals(t *testing.T) {
+	ctx := acctest.Context(t)
+	var resourceShare1, resourceShare2 awstypes.ResourceShare
+	resourceName := "aws_ram_resource_share.test"
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.RAMServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckResourceShareDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccResourceShareConfig_allowExternalPrincipals(rName, false),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckResourceShareExists(ctx, t, resourceName, &resourceShare1),
+					resource.TestCheckResourceAttr(resourceName, "allow_external_principals", acctest.CtFalse),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccResourceShareConfig_allowExternalPrincipals(rName, true),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckResourceShareExists(ctx, t, resourceName, &resourceShare2),
+					resource.TestCheckResourceAttr(resourceName, "allow_external_principals", acctest.CtTrue),
+				),
+			},
+		},
+	})
+}
+
+func TestAccRAMResourceShare_name(t *testing.T) {
+	ctx := acctest.Context(t)
+	var resourceShare1, resourceShare2 awstypes.ResourceShare
+	resourceName := "aws_ram_resource_share.test"
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	rName2 := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.RAMServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckResourceShareDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccResourceShareConfig_name(rName),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckResourceShareExists(ctx, t, resourceName, &resourceShare1),
+					resource.TestCheckResourceAttr(resourceName, names.AttrName, rName),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccResourceShareConfig_name(rName2),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckResourceShareExists(ctx, t, resourceName, &resourceShare2),
+					resource.TestCheckResourceAttr(resourceName, names.AttrName, rName2),
+				),
+			},
+		},
+	})
+}
+
+func TestAccRAMResourceShare_resourceShareConfiguration(t *testing.T) {
+	ctx := acctest.Context(t)
+	var resourceShare1, resourceShare2 awstypes.ResourceShare
+	resourceName := "aws_ram_resource_share.test"
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.RAMServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckResourceShareDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccResourceShareConfig_resourceShareConfiguration(rName, true),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckResourceShareExists(ctx, t, resourceName, &resourceShare1),
+					resource.TestCheckResourceAttr(resourceName, names.AttrName, rName),
+					resource.TestCheckResourceAttr(resourceName, "resource_share_configuration.0.retain_sharing_on_account_leave_organization", acctest.CtTrue),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccResourceShareConfig_resourceShareConfiguration(rName, false),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckResourceShareExists(ctx, t, resourceName, &resourceShare2),
+					resource.TestCheckResourceAttr(resourceName, names.AttrName, rName),
+					resource.TestCheckResourceAttr(resourceName, "resource_share_configuration.0.retain_sharing_on_account_leave_organization", acctest.CtFalse),
+					testAccCheckResourceShareRecreated(&resourceShare1, &resourceShare2),
+				),
+			},
+		},
+	})
+}
+
+func TestAccRAMResourceShare_disappears(t *testing.T) {
+	ctx := acctest.Context(t)
+	var resourceShare awstypes.ResourceShare
+	resourceName := "aws_ram_resource_share.test"
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.RAMServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckResourceShareDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccResourceShareConfig_name(rName),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckResourceShareExists(ctx, t, resourceName, &resourceShare),
+					acctest.CheckSDKResourceDisappears(ctx, t, tfram.ResourceResourceShare(), resourceName),
+				),
+				ExpectNonEmptyPlan: true,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+					PostApplyPostRefresh: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func testAccCheckResourceShareExists(ctx context.Context, t *testing.T, n string, v *awstypes.ResourceShare) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[n]
+		if !ok {
+			return fmt.Errorf("Not found: %s", n)
+		}
+
+		conn := acctest.ProviderMeta(ctx, t).RAMClient(ctx)
+
+		output, err := tfram.FindResourceShareOwnerSelfByARN(ctx, conn, rs.Primary.ID)
+
+		if err != nil {
+			return err
+		}
+
+		*v = *output
+
+		return nil
+	}
+}
+
+func testAccCheckResourceShareDestroy(ctx context.Context, t *testing.T) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		conn := acctest.ProviderMeta(ctx, t).RAMClient(ctx)
+
+		for _, rs := range s.RootModule().Resources {
+			if rs.Type != "aws_ram_resource_share" {
+				continue
+			}
+
+			_, err := tfram.FindResourceShareOwnerSelfByARN(ctx, conn, rs.Primary.ID)
+
+			if retry.NotFound(err) {
+				continue
+			}
+
+			if err != nil {
+				return err
+			}
+
+			return fmt.Errorf("RAM Resource Share %s still exists", rs.Primary.ID)
+		}
+
+		return nil
+	}
+}
+
+func testAccCheckResourceShareRecreated(i, j *awstypes.ResourceShare) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		if before, after := aws.ToString(i.ResourceShareArn), aws.ToString(j.ResourceShareArn); before == after {
+			return fmt.Errorf("RAM Resource Share (%s) not recreated", before)
+		}
+
+		return nil
+	}
+}
+
+func testAccResourceShareConfig_allowExternalPrincipals(rName string, allowExternalPrincipals bool) string {
+	return fmt.Sprintf(`
+resource "aws_ram_resource_share" "test" {
+  allow_external_principals = %[1]t
+  name                      = %[2]q
+}
+`, allowExternalPrincipals, rName)
+}
+
+func testAccResourceShareConfig_name(rName string) string {
+	return fmt.Sprintf(`
+resource "aws_ram_resource_share" "test" {
+  name = %[1]q
+}
+`, rName)
+}
+
+func testAccResourceShareConfig_resourceShareConfiguration(rName string, retainSharingOnAccountLeaveOrganization bool) string {
+	return fmt.Sprintf(`
+resource "aws_ram_resource_share" "test" {
+  name = %[1]q
+
+  allow_external_principals = true
+  resource_share_configuration {
+    retain_sharing_on_account_leave_organization = %[2]t
+  }
+}
+`, rName, retainSharingOnAccountLeaveOrganization)
+}
+
+func testAccResourceShareConfig_namePermission(rName string) string {
+	return fmt.Sprintf(`
+data "aws_partition" "current" {}
+
+resource "aws_ram_resource_share" "test" {
+  name            = %[1]q
+  permission_arns = ["arn:${data.aws_partition.current.partition}:ram::aws:permission/AWSRAMBlankEndEntityCertificateAPICSRPassthroughIssuanceCertificateAuthority"]
+}
+`, rName)
+}

@@ -1,0 +1,155 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+package redshift_test
+
+import (
+	"context"
+	"fmt"
+	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/redshift"
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-provider-aws/internal/acctest"
+	"github.com/hashicorp/terraform-provider-aws/names"
+)
+
+func TestAccRedshiftOrderableClusterDataSource_clusterType(t *testing.T) {
+	ctx := acctest.Context(t)
+	dataSourceName := "data.aws_redshift_orderable_cluster.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); testAccOrderableClusterPreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.RedshiftServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             nil,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccOrderableClusterDataSourceConfig_type("multi-node"),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr(dataSourceName, "cluster_type", "multi-node"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccRedshiftOrderableClusterDataSource_clusterVersion(t *testing.T) {
+	ctx := acctest.Context(t)
+	dataSourceName := "data.aws_redshift_orderable_cluster.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); testAccOrderableClusterPreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.RedshiftServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             nil,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccOrderableClusterDataSourceConfig_version("1.0"),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr(dataSourceName, "cluster_version", "1.0"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccRedshiftOrderableClusterDataSource_nodeType(t *testing.T) {
+	ctx := acctest.Context(t)
+	dataSourceName := "data.aws_redshift_orderable_cluster.test"
+	nodeType := "ra3.xlplus"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); testAccOrderableClusterPreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.RedshiftServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             nil,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccOrderableClusterDataSourceConfig_nodeType(nodeType),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr(dataSourceName, "node_type", nodeType),
+				),
+			},
+		},
+	})
+}
+
+func TestAccRedshiftOrderableClusterDataSource_preferredNodeTypes(t *testing.T) {
+	ctx := acctest.Context(t)
+	dataSourceName := "data.aws_redshift_orderable_cluster.test"
+	preferredNodeType := "ra3.xlplus"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); testAccOrderableClusterPreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.RedshiftServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             nil,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccOrderableClusterDataSourceConfig_preferredNodeTypes(preferredNodeType),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr(dataSourceName, "node_type", preferredNodeType),
+				),
+			},
+		},
+	})
+}
+
+func testAccOrderableClusterPreCheck(ctx context.Context, t *testing.T) {
+	conn := acctest.ProviderMeta(ctx, t).RedshiftClient(ctx)
+
+	input := &redshift.DescribeOrderableClusterOptionsInput{
+		MaxRecords: aws.Int32(20),
+	}
+
+	_, err := conn.DescribeOrderableClusterOptions(ctx, input)
+
+	if acctest.PreCheckSkipError(err) {
+		t.Skipf("skipping acceptance testing: %s", err)
+	}
+
+	if err != nil {
+		t.Fatalf("unexpected PreCheck error: %s", err)
+	}
+}
+
+func testAccOrderableClusterDataSourceConfig_type(clusterType string) string {
+	return fmt.Sprintf(`
+data "aws_redshift_orderable_cluster" "test" {
+  cluster_type         = %[1]q
+  preferred_node_types = ["ra3.large", "ds2.xlarge"]
+}
+`, clusterType)
+}
+
+func testAccOrderableClusterDataSourceConfig_version(clusterVersion string) string {
+	return fmt.Sprintf(`
+data "aws_redshift_orderable_cluster" "test" {
+  cluster_version      = %[1]q
+  preferred_node_types = ["ra3.xlplus", "ra3.large"]
+}
+`, clusterVersion)
+}
+
+func testAccOrderableClusterDataSourceConfig_nodeType(nodeType string) string {
+	return fmt.Sprintf(`
+data "aws_redshift_orderable_cluster" "test" {
+  node_type            = %[1]q
+  preferred_node_types = ["ra3.xlplus", "ra3.large"]
+}
+`, nodeType)
+}
+
+func testAccOrderableClusterDataSourceConfig_preferredNodeTypes(preferredNodeType string) string {
+	return fmt.Sprintf(`
+data "aws_redshift_orderable_cluster" "test" {
+  preferred_node_types = [
+    "non-existent",
+    %[1]q,
+    "try-again",
+  ]
+}
+`, preferredNodeType)
+}

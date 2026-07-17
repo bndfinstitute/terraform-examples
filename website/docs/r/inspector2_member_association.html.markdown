@@ -1,0 +1,60 @@
+---
+subcategory: "Inspector"
+layout: "aws"
+page_title: "AWS: aws_inspector2_member_association"
+description: |-
+  Terraform resource for managing an Amazon Inspector Member Association.
+---
+
+# Resource: aws_inspector2_member_association
+
+Terraform resource for associating accounts to existing Inspector instances.
+
+## Example Usage
+
+### Basic Usage
+
+```terraform
+resource "aws_inspector2_member_association" "example" {
+  account_id = "123456789012"
+}
+```
+
+## Argument Reference
+
+This resource supports the following arguments:
+
+* `account_id` - (Required) ID of the account to associate
+* `region` - (Optional) Region where this resource will be [managed](https://docs.aws.amazon.com/general/latest/gr/rande.html#regional-endpoints). Defaults to the Region set in the [provider configuration](https://registry.terraform.io/providers/hashicorp/aws/latest/docs#aws-configuration-reference).
+
+## Attribute Reference
+
+This resource exports the following attributes in addition to the arguments above:
+
+* `delegated_admin_account_id` - Account ID of the delegated administrator account
+* `relationship_status` - Status of the member relationship
+* `updated_at` - Date and time of the last update of the relationship
+
+## Timeouts
+
+[Configuration options](https://developer.hashicorp.com/terraform/language/resources/syntax#operation-timeouts):
+
+* `create` - (Default `5m`)
+* `delete` - (Default `5m`)
+
+## Import
+
+In Terraform v1.5.0 and later, use an [`import` block](https://developer.hashicorp.com/terraform/language/import) to import Amazon Inspector Member Association using the `account_id`. For example:
+
+```terraform
+import {
+  to = aws_inspector2_member_association.example
+  id = "123456789012"
+}
+```
+
+Using `terraform import`, import Amazon Inspector Member Association using the `account_id`. For example:
+
+```console
+% terraform import aws_inspector2_member_association.example 123456789012
+```

@@ -1,0 +1,207 @@
+# Copyright IBM Corp. 2014, 2026
+# "SPDX-License-Identifier: MPL-2.0"
+
+## These checks will be superseded by documentation.yml
+## when the provider documentation layout is moved to
+## the Terraform Registry layout.
+name: Website Checks
+on:
+  push:
+    branches:
+      - main
+      - "release/**"
+  pull_request:
+    paths:
+      - .github/workflows/website.yml
+      - .ci/.markdownlinkcheck.json
+      - .ci/.tflint.hcl
+      - .ci/opa-policies/**
+      - .ci/tools/go.mod
+      - .markdownlint.yml
+      - website/docs/**
+
+## NOTE: !!!
+## When changing these workflows, ensure that the following is updated:
+##   - Documentation: docs/continuous-integration.md
+##   - Documentation: docs/makefile-cheat-sheet.md
+##   - Makefile: ./GNUmakefile
+
+permissions:
+  contents: read # required for checkout
+
+jobs:
+  tflint-opa-policy-tests:
+    uses: ./.github/workflows/tflint-opa-policy-tests.yml
+
+  markdown-link-check-a-h-markdown:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: YakDriver/md-check-links@0a295ce2e08c544aae01cccc9b4c6801a8398942 # v2.2.0
+        name: markdown-link-check website/docs/**/[a-h].markdown
+        with:
+          quiet: "yes"
+          verbose: "yes"
+          config: ".ci/.markdownlinkcheck.json"
+          directory: "website/docs/r, website/docs/d"
+          prefix: "[a-h]"
+          extension: ".markdown"
+          branch: "main"
+          modified: "no"
+
+  markdown-link-check-i-z-markdown:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: YakDriver/md-check-links@0a295ce2e08c544aae01cccc9b4c6801a8398942 # v2.2.0
+        name: markdown-link-check website/docs/**/[i-z].markdown
+        with:
+          quiet: "yes"
+          verbose: "yes"
+          config: ".ci/.markdownlinkcheck.json"
+          directory: "website/docs/r, website/docs/d"
+          prefix: "[i-z]"
+          extension: ".markdown"
+          branch: "main"
+          modified: "no"
+
+  markdown-link-check-md:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: YakDriver/md-check-links@0a295ce2e08c544aae01cccc9b4c6801a8398942 # v2.2.0
+        name: markdown-link-check website/docs/**/*.md
+        with:
+          quiet: "yes"
+          verbose: "yes"
+          config: ".ci/.markdownlinkcheck.json"
+          directory: "website/docs"
+          depth: 2
+          extension: ".md"
+          # Checking only modified files in the PR does not respect 'mex-depth'.
+          # branch: "main"
+          # modified: "yes"
+
+  markdown-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: avto-dev/markdown-lint@04d43ee9191307b50935a753da3b775ab695eceb # v1.5.0
+        with:
+          args: "website/docs"
+
+  misspell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: .ci/tools/go.mod
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        timeout-minutes: 2
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-pkg-mod-${{ hashFiles('go.sum') }}
+      - run: cd .ci/tools && go install github.com/client9/misspell/cmd/misspell
+      - run: make website-misspell
+
+  terrafmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: .ci/tools/go.mod
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        timeout-minutes: 2
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-pkg-mod-${{ hashFiles('go.sum') }}
+      - run: cd .ci/tools && go install github.com/katbyte/terrafmt
+      - run: terrafmt diff ./website --check --pattern '*.markdown'
+
+  tflint:
+    needs: tflint-opa-policy-tests
+    runs-on: custom-ubuntu-22.04-xl
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: .ci/tools/go.mod
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        timeout-minutes: 2
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-pkg-mod-${{ hashFiles('go.sum') }}
+
+      - run: cd .ci/tools && go install github.com/katbyte/terrafmt
+      - run: cd .ci/tools && go install github.com/terraform-linters/tflint
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        name: Cache plugin dir
+        with:
+          path: ~/.tflint.d/plugins
+          key: ${{ runner.os }}-tflint-${{ hashFiles('.ci/.tflint.hcl') }}
+
+      - run: tflint --config .ci/.tflint.hcl --init
+
+      - run: sudo apt-get update && sudo apt-get install -y parallel
+
+      - run: |
+          validate_file() {
+            filename=$1
+
+            # Configure the rules for tflint.
+            shared_rules=(
+                "--disable-rule=opa_deny_acmpca_deletion_time"
+                "--disable-rule=aws_cloudwatch_event_target_invalid_arn"
+                "--disable-rule=aws_db_instance_default_parameter_group"
+                "--disable-rule=aws_elasticache_cluster_default_parameter_group"
+                "--disable-rule=aws_elasticache_replication_group_default_parameter_group"
+                "--disable-rule=aws_iam_policy_sid_invalid_characters"
+                "--disable-rule=aws_iam_saml_provider_invalid_saml_metadata_document"
+                "--disable-rule=aws_iam_server_certificate_invalid_certificate_body"
+                "--disable-rule=aws_iam_server_certificate_invalid_private_key"
+                "--disable-rule=aws_iot_certificate_invalid_csr"
+                "--disable-rule=aws_lb_invalid_load_balancer_type"
+                "--disable-rule=aws_lb_target_group_invalid_protocol"
+                "--disable-rule=aws_networkfirewall_rule_group_invalid_rules"
+                "--disable-rule=aws_s3_object_copy_invalid_source"
+                "--disable-rule=aws_servicecatalog_portfolio_share_invalid_type"
+                "--disable-rule=aws_transfer_ssh_key_invalid_body"
+                "--disable-rule=terraform_unused_declarations"
+                "--disable-rule=terraform_typed_variables"
+            )
+
+            rules=("${shared_rules[@]}")
+            if [[ "$filename" == "./website/docs/guides/version-2-upgrade.html.markdown" ]]; then
+                rules+=(
+                "--disable-rule=terraform_deprecated_index"
+                "--disable-rule=terraform_deprecated_interpolation"
+                )
+            elif [[ "$filename" == "./website/docs/guides/version-3-upgrade.html.markdown" ]]; then
+                rules+=(
+                "--enable-rule=terraform_deprecated_index"
+                "--disable-rule=terraform_deprecated_interpolation"
+                )
+            else
+                rules+=(
+                "--enable-rule=terraform_deprecated_index"
+                "--enable-rule=terraform_deprecated_interpolation"
+                )
+            fi
+
+            ./.ci/scripts/validate-terraform-file.sh "$filename" "${rules[@]}"
+          }
+          export -f validate_file
+
+          find ./website/docs -type f -name '*.markdown' | \
+            sort -u | \
+            parallel -j 16 --halt soon,fail=1 validate_file {}
+        env:
+          TFLINT_OPA_POLICY_DIR: ${{ github.workspace }}/.ci/opa-policies

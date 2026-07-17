@@ -1,0 +1,159 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+package servicecatalog_test
+
+import (
+	"context"
+	"fmt"
+	"testing"
+
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-provider-aws/internal/acctest"
+	"github.com/hashicorp/terraform-provider-aws/internal/retry"
+	tfservicecatalog "github.com/hashicorp/terraform-provider-aws/internal/service/servicecatalog"
+	"github.com/hashicorp/terraform-provider-aws/names"
+)
+
+// add sweeper to delete known test servicecat tag option resource associations
+
+func TestAccServiceCatalogTagOptionResourceAssociation_basic(t *testing.T) {
+	ctx := acctest.Context(t)
+	resourceName := "aws_servicecatalog_tag_option_resource_association.test"
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ServiceCatalogServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckTagOptionResourceAssociationDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccTagOptionResourceAssociationConfig_basic(rName),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckTagOptionResourceAssociationExists(ctx, t, resourceName),
+					resource.TestCheckResourceAttrPair(resourceName, names.AttrResourceID, "aws_servicecatalog_portfolio.test", names.AttrID),
+					resource.TestCheckResourceAttrPair(resourceName, "tag_option_id", "aws_servicecatalog_tag_option.test", names.AttrID),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+		},
+	})
+}
+
+func TestAccServiceCatalogTagOptionResourceAssociation_disappears(t *testing.T) {
+	ctx := acctest.Context(t)
+	resourceName := "aws_servicecatalog_tag_option_resource_association.test"
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ServiceCatalogServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckTagOptionResourceAssociationDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccTagOptionResourceAssociationConfig_basic(rName),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckTagOptionResourceAssociationExists(ctx, t, resourceName),
+					acctest.CheckSDKResourceDisappears(ctx, t, tfservicecatalog.ResourceTagOptionResourceAssociation(), resourceName),
+				),
+				ExpectNonEmptyPlan: true,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("aws_servicecatalog_tag_option_resource_association.test", plancheck.ResourceActionCreate),
+					},
+					PostApplyPostRefresh: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("aws_servicecatalog_tag_option_resource_association.test", plancheck.ResourceActionCreate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func testAccCheckTagOptionResourceAssociationDestroy(ctx context.Context, t *testing.T) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		conn := acctest.ProviderMeta(ctx, t).ServiceCatalogClient(ctx)
+
+		for _, rs := range s.RootModule().Resources {
+			if rs.Type != "aws_servicecatalog_tag_option_resource_association" {
+				continue
+			}
+
+			tagOptionID, resourceID, err := tfservicecatalog.TagOptionResourceAssociationParseID(rs.Primary.ID)
+
+			if err != nil {
+				return fmt.Errorf("could not parse ID (%s): %w", rs.Primary.ID, err)
+			}
+
+			err = tfservicecatalog.WaitTagOptionResourceAssociationDeleted(ctx, conn, tagOptionID, resourceID, tfservicecatalog.TagOptionResourceAssociationDeleteTimeout)
+
+			if retry.NotFound(err) {
+				continue
+			}
+
+			if err != nil {
+				return fmt.Errorf("waiting for Service Catalog Tag Option Resource Association to be destroyed (%s): %w", rs.Primary.ID, err)
+			}
+		}
+
+		return nil
+	}
+}
+
+func testAccCheckTagOptionResourceAssociationExists(ctx context.Context, t *testing.T, resourceName string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[resourceName]
+
+		if !ok {
+			return fmt.Errorf("resource not found: %s", resourceName)
+		}
+
+		tagOptionID, resourceID, err := tfservicecatalog.TagOptionResourceAssociationParseID(rs.Primary.ID)
+
+		if err != nil {
+			return fmt.Errorf("could not parse ID (%s): %w", rs.Primary.ID, err)
+		}
+
+		conn := acctest.ProviderMeta(ctx, t).ServiceCatalogClient(ctx)
+
+		_, err = tfservicecatalog.WaitTagOptionResourceAssociationReady(ctx, conn, tagOptionID, resourceID, tfservicecatalog.TagOptionResourceAssociationReadyTimeout)
+
+		if err != nil {
+			return fmt.Errorf("waiting for Service Catalog Tag Option Resource Association existence (%s): %w", rs.Primary.ID, err)
+		}
+
+		return nil
+	}
+}
+
+func testAccTagOptionResourceAssociationConfig_base(rName string) string {
+	return fmt.Sprintf(`
+resource "aws_servicecatalog_portfolio" "test" {
+  name          = %[1]q
+  description   = %[1]q
+  provider_name = %[1]q
+}
+
+resource "aws_servicecatalog_tag_option" "test" {
+  key   = %[1]q
+  value = %[1]q
+}
+`, rName)
+}
+
+func testAccTagOptionResourceAssociationConfig_basic(rName string) string {
+	return acctest.ConfigCompose(testAccTagOptionResourceAssociationConfig_base(rName), `
+resource "aws_servicecatalog_tag_option_resource_association" "test" {
+  resource_id   = aws_servicecatalog_portfolio.test.id
+  tag_option_id = aws_servicecatalog_tag_option.test.id
+}
+`)
+}

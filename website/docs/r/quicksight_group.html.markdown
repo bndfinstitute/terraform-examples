@@ -1,0 +1,52 @@
+---
+subcategory: "QuickSight"
+layout: "aws"
+page_title: "AWS: aws_quicksight_group"
+description: |-
+  Manages a Resource QuickSight Group.
+---
+
+# Resource: aws_quicksight_group
+
+Resource for managing QuickSight Group
+
+## Example Usage
+
+```terraform
+resource "aws_quicksight_group" "example" {
+  group_name = "tf-example"
+}
+```
+
+## Argument Reference
+
+This resource supports the following arguments:
+
+* `aws_account_id` - (Optional, Forces new resource) AWS account ID. Defaults to automatically determined account ID of the Terraform AWS provider.
+* `description` - (Optional) A description for the group.
+* `group_name` - (Required) A name for the group.
+* `namespace` - (Optional) The namespace. Currently, you should set this to `default`.
+* `region` - (Optional) Region where this resource will be [managed](https://docs.aws.amazon.com/general/latest/gr/rande.html#regional-endpoints). Defaults to the Region set in the [provider configuration](https://registry.terraform.io/providers/hashicorp/aws/latest/docs#aws-configuration-reference).
+
+## Attribute Reference
+
+This resource exports the following attributes in addition to the arguments above:
+
+* `arn` - Amazon Resource Name (ARN) of group
+
+## Import
+
+In Terraform v1.5.0 and later, use an [`import` block](https://developer.hashicorp.com/terraform/language/import) to import QuickSight Group using the aws account id, namespace and group name separated by `/`. For example:
+
+```terraform
+import {
+  to = aws_quicksight_group.example
+  id = "123456789123/default/tf-example"
+}
+```
+
+Using `terraform import`, import QuickSight Group using the aws account id, namespace and group name separated by `/`. For example:
+
+```console
+% terraform import aws_quicksight_group.example 123456789123/default/tf-example
+```

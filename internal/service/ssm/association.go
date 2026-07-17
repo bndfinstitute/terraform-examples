@@ -1,0 +1,528 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+// DONOTCOPY: Copying old resources spreads bad habits. Use skaff instead.
+
+package ssm
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"strings"
+	"time"
+
+	"github.com/YakDriver/regexache"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	awstypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
+	"github.com/hashicorp/terraform-provider-aws/internal/conns"
+	"github.com/hashicorp/terraform-provider-aws/internal/enum"
+	"github.com/hashicorp/terraform-provider-aws/internal/errs"
+	"github.com/hashicorp/terraform-provider-aws/internal/errs/sdkdiag"
+	"github.com/hashicorp/terraform-provider-aws/internal/flex"
+	tfmaps "github.com/hashicorp/terraform-provider-aws/internal/maps"
+	"github.com/hashicorp/terraform-provider-aws/internal/retry"
+	tftags "github.com/hashicorp/terraform-provider-aws/internal/tags"
+	"github.com/hashicorp/terraform-provider-aws/internal/tfresource"
+	"github.com/hashicorp/terraform-provider-aws/names"
+)
+
+// @SDKResource("aws_ssm_association", name="Association")
+// @Tags(identifierAttribute="id", resourceType="Association")
+// @IdentityAttribute("association_id")
+// @Testing(idAttrDuplicates="association_id")
+// @Testing(preIdentityVersion="v6.10.0")
+func resourceAssociation() *schema.Resource {
+	//lintignore:R011
+	return &schema.Resource{
+		CreateWithoutTimeout: resourceAssociationCreate,
+		ReadWithoutTimeout:   resourceAssociationRead,
+		UpdateWithoutTimeout: resourceAssociationUpdate,
+		DeleteWithoutTimeout: resourceAssociationDelete,
+
+		MigrateState:  associationMigrateState,
+		SchemaVersion: 1,
+
+		SchemaFunc: func() map[string]*schema.Schema {
+			return map[string]*schema.Schema{
+				"apply_only_at_cron_interval": {
+					Type:     schema.TypeBool,
+					Default:  false,
+					Optional: true,
+				},
+				names.AttrARN: {
+					Type:     schema.TypeString,
+					Computed: true,
+				},
+				names.AttrAssociationID: {
+					Type:     schema.TypeString,
+					Computed: true,
+				},
+				"association_name": {
+					Type:     schema.TypeString,
+					Optional: true,
+					ValidateFunc: validation.All(
+						validation.StringLenBetween(3, 128),
+						validation.StringMatch(regexache.MustCompile(`^[0-9A-Za-z_.-]{3,128}$`), "must contain only alphanumeric, underscore, hyphen, or period characters"),
+					),
+				},
+				"automation_target_parameter_name": {
+					Type:         schema.TypeString,
+					Optional:     true,
+					ValidateFunc: validation.StringLenBetween(1, 50),
+				},
+				"calendar_names": {
+					Type:     schema.TypeSet,
+					Optional: true,
+					Elem: &schema.Schema{
+						Type: schema.TypeString,
+					},
+				},
+				"compliance_severity": {
+					Type:             schema.TypeString,
+					Optional:         true,
+					ValidateDiagFunc: enum.Validate[awstypes.ComplianceSeverity](),
+				},
+				"document_version": {
+					Type:         schema.TypeString,
+					Optional:     true,
+					Computed:     true,
+					ValidateFunc: validation.StringMatch(regexache.MustCompile(`^([$]LATEST|[$]DEFAULT|^[1-9][0-9]*$)$`), ""),
+				},
+				"max_concurrency": {
+					Type:         schema.TypeString,
+					Optional:     true,
+					ValidateFunc: validation.StringMatch(regexache.MustCompile(`^([1-9][0-9]*|[1-9][0-9]%|[1-9]%|100%)$`), "must be a valid number (e.g. 10) or percentage including the percent sign (e.g. 10%)"),
+				},
+				"max_errors": {
+					Type:         schema.TypeString,
+					Optional:     true,
+					ValidateFunc: validation.StringMatch(regexache.MustCompile(`^([1-9][0-9]*|[0]|[1-9][0-9]%|[0-9]%|100%)$`), "must be a valid number (e.g. 10) or percentage including the percent sign (e.g. 10%)"),
+				},
+				names.AttrName: {
+					Type:     schema.TypeString,
+					ForceNew: true,
+					Required: true,
+				},
+				"output_location": {
+					Type:     schema.TypeList,
+					MaxItems: 1,
+					Optional: true,
+					Elem: &schema.Resource{
+						Schema: map[string]*schema.Schema{
+							names.AttrS3BucketName: {
+								Type:         schema.TypeString,
+								Required:     true,
+								ValidateFunc: validation.StringLenBetween(3, 63),
+							},
+							names.AttrS3KeyPrefix: {
+								Type:         schema.TypeString,
+								Optional:     true,
+								ValidateFunc: validation.StringLenBetween(0, 500),
+							},
+							"s3_region": {
+								Type:         schema.TypeString,
+								Optional:     true,
+								ValidateFunc: validation.StringLenBetween(3, 20),
+							},
+						},
+					},
+				},
+				names.AttrParameters: {
+					Type:     schema.TypeMap,
+					Optional: true,
+					Computed: true,
+					Elem:     &schema.Schema{Type: schema.TypeString},
+				},
+				names.AttrScheduleExpression: {
+					Type:         schema.TypeString,
+					Optional:     true,
+					ValidateFunc: validation.StringLenBetween(1, 256),
+				},
+				"sync_compliance": {
+					Type:             schema.TypeString,
+					Optional:         true,
+					ValidateDiagFunc: enum.Validate[awstypes.AssociationSyncCompliance](),
+				},
+				names.AttrTags:    tftags.TagsSchema(),
+				names.AttrTagsAll: tftags.TagsSchemaComputed(),
+				"targets": {
+					Type:     schema.TypeList,
+					Optional: true,
+					Computed: true,
+					MaxItems: 5,
+					Elem: &schema.Resource{
+						Schema: map[string]*schema.Schema{
+							names.AttrKey: {
+								Type:         schema.TypeString,
+								Required:     true,
+								ValidateFunc: validation.StringLenBetween(1, 163),
+							},
+							names.AttrValues: {
+								Type:     schema.TypeList,
+								Required: true,
+								MaxItems: 50,
+								Elem:     &schema.Schema{Type: schema.TypeString},
+							},
+						},
+					},
+				},
+				"wait_for_success_timeout_seconds": {
+					Type:     schema.TypeInt,
+					Optional: true,
+				},
+			}
+		},
+	}
+}
+
+func resourceAssociationCreate(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
+	var diags diag.Diagnostics
+	conn := meta.(*conns.AWSClient).SSMClient(ctx)
+
+	name := d.Get(names.AttrName).(string)
+	input := &ssm.CreateAssociationInput{
+		Name: aws.String(name),
+		Tags: getTagsIn(ctx),
+	}
+
+	if v, ok := d.GetOk("apply_only_at_cron_interval"); ok {
+		input.ApplyOnlyAtCronInterval = v.(bool)
+	}
+
+	if v, ok := d.GetOk("association_name"); ok {
+		input.AssociationName = aws.String(v.(string))
+	}
+
+	if v, ok := d.GetOk("automation_target_parameter_name"); ok {
+		input.AutomationTargetParameterName = aws.String(v.(string))
+	}
+
+	if v, ok := d.GetOk("calendar_names"); ok && v.(*schema.Set).Len() > 0 {
+		input.CalendarNames = flex.ExpandStringValueSet(v.(*schema.Set))
+	}
+
+	if v, ok := d.GetOk("compliance_severity"); ok {
+		input.ComplianceSeverity = awstypes.AssociationComplianceSeverity(v.(string))
+	}
+
+	if v, ok := d.GetOk("document_version"); ok {
+		input.DocumentVersion = aws.String(v.(string))
+	}
+
+	if v, ok := d.GetOk("max_concurrency"); ok {
+		input.MaxConcurrency = aws.String(v.(string))
+	}
+
+	if v, ok := d.GetOk("max_errors"); ok {
+		input.MaxErrors = aws.String(v.(string))
+	}
+
+	if v, ok := d.GetOk("output_location"); ok {
+		input.OutputLocation = expandAssociationOutputLocation(v.([]any))
+	}
+
+	if v, ok := d.GetOk(names.AttrParameters); ok {
+		input.Parameters = expandParameters(v.(map[string]any))
+	}
+
+	if v, ok := d.GetOk(names.AttrScheduleExpression); ok {
+		input.ScheduleExpression = aws.String(v.(string))
+	}
+
+	if v, ok := d.GetOk("sync_compliance"); ok {
+		input.SyncCompliance = awstypes.AssociationSyncCompliance(v.(string))
+	}
+
+	if v, ok := d.GetOk("targets"); ok {
+		input.Targets = expandTargets(v.([]any))
+	}
+
+	output, err := conn.CreateAssociation(ctx, input)
+
+	if err != nil {
+		return sdkdiag.AppendErrorf(diags, "creating SSM Association (%s): %s", name, err)
+	}
+
+	d.SetId(aws.ToString(output.AssociationDescription.AssociationId))
+
+	if v, ok := d.GetOk("wait_for_success_timeout_seconds"); ok {
+		timeout := time.Duration(v.(int)) * time.Second //nolint:durationcheck // should really be d.Timeout(schema.TimeoutCreate)
+		if _, err := waitAssociationCreated(ctx, conn, d.Id(), timeout); err != nil {
+			return sdkdiag.AppendErrorf(diags, "waiting for SSM Association (%s) create: %s", d.Id(), err)
+		}
+	}
+
+	return append(diags, resourceAssociationRead(ctx, d, meta)...)
+}
+
+func resourceAssociationRead(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
+	var diags diag.Diagnostics
+	awsClient := meta.(*conns.AWSClient)
+	conn := awsClient.SSMClient(ctx)
+
+	out, err := findAssociationByID(ctx, conn, d.Id())
+
+	if !d.IsNewResource() && retry.NotFound(err) {
+		log.Printf("[WARN] SSM Association %s not found, removing from state", d.Id())
+		d.SetId("")
+		return diags
+	}
+
+	if err != nil {
+		return sdkdiag.AppendErrorf(diags, "reading SSM Association (%s): %s", d.Id(), err)
+	}
+
+	if err := resourceAssociationFlatten(ctx, awsClient, out, d); err != nil {
+		return sdkdiag.AppendErrorf(diags, "flattening SSM Association (%s): %s", d.Id(), err)
+	}
+
+	return diags
+}
+
+func resourceAssociationUpdate(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
+	var diags diag.Diagnostics
+	conn := meta.(*conns.AWSClient).SSMClient(ctx)
+
+	if d.HasChangesExcept(names.AttrTags, names.AttrTagsAll) {
+		// AWS creates a new version every time the association is updated, so everything should be passed in the update.
+		input := &ssm.UpdateAssociationInput{
+			AssociationId: aws.String(d.Id()),
+		}
+
+		if v, ok := d.GetOk("apply_only_at_cron_interval"); ok {
+			input.ApplyOnlyAtCronInterval = v.(bool)
+		}
+
+		if v, ok := d.GetOk("association_name"); ok {
+			input.AssociationName = aws.String(v.(string))
+		}
+
+		if v, ok := d.GetOk("automation_target_parameter_name"); ok {
+			input.AutomationTargetParameterName = aws.String(v.(string))
+		}
+
+		if v, ok := d.GetOk("calendar_names"); ok && v.(*schema.Set).Len() > 0 {
+			input.CalendarNames = flex.ExpandStringValueSet(v.(*schema.Set))
+		}
+
+		if v, ok := d.GetOk("compliance_severity"); ok {
+			input.ComplianceSeverity = awstypes.AssociationComplianceSeverity(v.(string))
+		}
+
+		if v, ok := d.GetOk("document_version"); ok {
+			input.DocumentVersion = aws.String(v.(string))
+		}
+
+		if v, ok := d.GetOk("max_concurrency"); ok {
+			input.MaxConcurrency = aws.String(v.(string))
+		}
+
+		if v, ok := d.GetOk("max_errors"); ok {
+			input.MaxErrors = aws.String(v.(string))
+		}
+
+		if v, ok := d.GetOk("output_location"); ok {
+			input.OutputLocation = expandAssociationOutputLocation(v.([]any))
+		}
+
+		if v, ok := d.GetOk(names.AttrParameters); ok {
+			input.Parameters = expandParameters(v.(map[string]any))
+		}
+
+		if v, ok := d.GetOk(names.AttrScheduleExpression); ok {
+			input.ScheduleExpression = aws.String(v.(string))
+		}
+
+		if d.HasChange("sync_compliance") {
+			input.SyncCompliance = awstypes.AssociationSyncCompliance(d.Get("sync_compliance").(string))
+		}
+
+		if _, ok := d.GetOk("targets"); ok {
+			input.Targets = expandTargets(d.Get("targets").([]any))
+		}
+
+		_, err := conn.UpdateAssociation(ctx, input)
+
+		if err != nil {
+			return sdkdiag.AppendErrorf(diags, "updating SSM Association (%s): %s", d.Id(), err)
+		}
+	}
+
+	return append(diags, resourceAssociationRead(ctx, d, meta)...)
+}
+
+func resourceAssociationDelete(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
+	var diags diag.Diagnostics
+	conn := meta.(*conns.AWSClient).SSMClient(ctx)
+
+	log.Printf("[DEBUG] Deleting SSM Association: %s", d.Id())
+	_, err := conn.DeleteAssociation(ctx, &ssm.DeleteAssociationInput{
+		AssociationId: aws.String(d.Id()),
+	})
+
+	if errs.IsA[*awstypes.AssociationDoesNotExist](err) {
+		return diags
+	}
+
+	if err != nil {
+		return sdkdiag.AppendErrorf(diags, "deleting SSM Association (%s): %s", d.Id(), err)
+	}
+
+	return diags
+}
+
+func findAssociationByID(ctx context.Context, conn *ssm.Client, id string) (*awstypes.AssociationDescription, error) {
+	input := &ssm.DescribeAssociationInput{
+		AssociationId: aws.String(id),
+	}
+
+	output, err := conn.DescribeAssociation(ctx, input)
+
+	if errs.IsA[*awstypes.AssociationDoesNotExist](err) {
+		return nil, &retry.NotFoundError{
+			LastError: err,
+		}
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	if output == nil || output.AssociationDescription == nil || output.AssociationDescription.Overview == nil {
+		return nil, tfresource.NewEmptyResultError()
+	}
+
+	return output.AssociationDescription, nil
+}
+
+func statusAssociation(conn *ssm.Client, id string) retry.StateRefreshFunc {
+	return func(ctx context.Context) (any, string, error) {
+		output, err := findAssociationByID(ctx, conn, id)
+
+		if retry.NotFound(err) {
+			return nil, "", nil
+		}
+
+		if err != nil {
+			return nil, "", err
+		}
+
+		// Use the Overview.Status field instead of the root-level Status as DescribeAssociation
+		// does not appear to return the root-level Status in the API response at this time.
+		return output, aws.ToString(output.Overview.Status), nil
+	}
+}
+
+func waitAssociationCreated(ctx context.Context, conn *ssm.Client, id string, timeout time.Duration) (*awstypes.AssociationDescription, error) {
+	stateConf := &retry.StateChangeConf{
+		Pending: enum.Slice(awstypes.AssociationStatusNamePending),
+		Target:  enum.Slice(awstypes.AssociationStatusNameSuccess),
+		Refresh: statusAssociation(conn, id),
+		Timeout: timeout,
+	}
+
+	outputRaw, err := stateConf.WaitForStateContext(ctx)
+
+	if output, ok := outputRaw.(*awstypes.AssociationDescription); ok {
+		if status := awstypes.AssociationStatusName(aws.ToString(output.Overview.Status)); status == awstypes.AssociationStatusNameFailed {
+			retry.SetLastError(err, errors.New(aws.ToString(output.Overview.DetailedStatus)))
+		}
+
+		return output, err
+	}
+
+	return nil, err
+}
+
+func expandParameters(tfMap map[string]any) map[string][]string {
+	return tfmaps.ApplyToAllValues(tfMap, func(v any) []string {
+		return []string{v.(string)}
+	})
+}
+
+func flattenParameters(apiObject map[string][]string) map[string]any {
+	return tfmaps.ApplyToAllValues(apiObject, func(v []string) any {
+		return strings.Join(v, ",")
+	})
+}
+
+func expandAssociationOutputLocation(tfList []any) *awstypes.InstanceAssociationOutputLocation {
+	if tfList == nil {
+		return nil
+	}
+
+	//We only allow 1 Item so we can grab the first in the list only
+	tfMap := tfList[0].(map[string]any)
+
+	s3OutputLocation := &awstypes.S3OutputLocation{
+		OutputS3BucketName: aws.String(tfMap[names.AttrS3BucketName].(string)),
+	}
+
+	if v, ok := tfMap[names.AttrS3KeyPrefix]; ok {
+		s3OutputLocation.OutputS3KeyPrefix = aws.String(v.(string))
+	}
+
+	if v, ok := tfMap["s3_region"].(string); ok && v != "" {
+		s3OutputLocation.OutputS3Region = aws.String(v)
+	}
+
+	return &awstypes.InstanceAssociationOutputLocation{
+		S3Location: s3OutputLocation,
+	}
+}
+
+func flattenAssociationOutputLocation(apiObject *awstypes.InstanceAssociationOutputLocation) []any {
+	if apiObject == nil || apiObject.S3Location == nil {
+		return nil
+	}
+
+	tfList := make([]any, 0)
+	tfMap := make(map[string]any)
+
+	tfMap[names.AttrS3BucketName] = aws.ToString(apiObject.S3Location.OutputS3BucketName)
+
+	if apiObject.S3Location.OutputS3KeyPrefix != nil {
+		tfMap[names.AttrS3KeyPrefix] = aws.ToString(apiObject.S3Location.OutputS3KeyPrefix)
+	}
+
+	if apiObject.S3Location.OutputS3Region != nil {
+		tfMap["s3_region"] = aws.ToString(apiObject.S3Location.OutputS3Region)
+	}
+
+	tfList = append(tfList, tfMap)
+
+	return tfList
+}
+
+func resourceAssociationFlatten(ctx context.Context, awsClient *conns.AWSClient, out *awstypes.AssociationDescription, d *schema.ResourceData) error {
+	d.Set("apply_only_at_cron_interval", out.ApplyOnlyAtCronInterval)
+	d.Set(names.AttrARN, awsClient.RegionalARN(ctx, "ssm", "association/"+d.Id()))
+	d.Set(names.AttrAssociationID, out.AssociationId)
+	d.Set("association_name", out.AssociationName)
+	d.Set("automation_target_parameter_name", out.AutomationTargetParameterName)
+	d.Set("calendar_names", out.CalendarNames)
+	d.Set("compliance_severity", out.ComplianceSeverity)
+	d.Set("document_version", out.DocumentVersion)
+	d.Set("max_concurrency", out.MaxConcurrency)
+	d.Set("max_errors", out.MaxErrors)
+	d.Set(names.AttrName, out.Name)
+	if err := d.Set("output_location", flattenAssociationOutputLocation(out.OutputLocation)); err != nil {
+		return fmt.Errorf("setting output_location: %w", err)
+	}
+	if err := d.Set(names.AttrParameters, flattenParameters(out.Parameters)); err != nil {
+		return fmt.Errorf("setting parameters: %w", err)
+	}
+	d.Set(names.AttrScheduleExpression, out.ScheduleExpression)
+	d.Set("sync_compliance", out.SyncCompliance)
+	if err := d.Set("targets", flattenTargets(out.Targets)); err != nil {
+		return fmt.Errorf("setting targets: %w", err)
+	}
+
+	return nil
+}

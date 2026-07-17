@@ -1,0 +1,362 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+package kafka_test
+
+import (
+	"context"
+	"fmt"
+	"testing"
+
+	"github.com/YakDriver/regexache"
+	"github.com/aws/aws-sdk-go-v2/service/kafka"
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-provider-aws/internal/acctest"
+	"github.com/hashicorp/terraform-provider-aws/internal/retry"
+	tfkafka "github.com/hashicorp/terraform-provider-aws/internal/service/kafka"
+	"github.com/hashicorp/terraform-provider-aws/names"
+)
+
+func TestAccKafkaConfiguration_basic(t *testing.T) {
+	ctx := acctest.Context(t)
+	var configuration1 kafka.DescribeConfigurationOutput
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_msk_configuration.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); testAccPreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.KafkaServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckConfigurationDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccConfigurationConfig_basic(rName),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckConfigurationExists(ctx, t, resourceName, &configuration1),
+					acctest.MatchResourceAttrRegionalARN(ctx, resourceName, names.AttrARN, "kafka", regexache.MustCompile(`configuration/.+`)),
+					resource.TestCheckResourceAttr(resourceName, names.AttrDescription, ""),
+					resource.TestCheckResourceAttr(resourceName, "kafka_versions.#", "0"),
+					resource.TestCheckResourceAttr(resourceName, "latest_revision", "1"),
+					resource.TestCheckResourceAttr(resourceName, names.AttrName, rName),
+					resource.TestMatchResourceAttr(resourceName, "server_properties", regexache.MustCompile(`auto.create.topics.enable = true`)),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+		},
+	})
+}
+
+func TestAccKafkaConfiguration_disappears(t *testing.T) {
+	ctx := acctest.Context(t)
+	var configuration1 kafka.DescribeConfigurationOutput
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_msk_configuration.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); testAccPreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.KafkaServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckConfigurationDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccConfigurationConfig_basic(rName),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckConfigurationExists(ctx, t, resourceName, &configuration1),
+					acctest.CheckSDKResourceDisappears(ctx, t, tfkafka.ResourceConfiguration(), resourceName),
+				),
+				ExpectNonEmptyPlan: true,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+					PostApplyPostRefresh: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccKafkaConfiguration_description(t *testing.T) {
+	ctx := acctest.Context(t)
+	var configuration1, configuration2 kafka.DescribeConfigurationOutput
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_msk_configuration.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); testAccPreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.KafkaServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckConfigurationDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccConfigurationConfig_description(rName, "description1"),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckConfigurationExists(ctx, t, resourceName, &configuration1),
+					resource.TestCheckResourceAttr(resourceName, names.AttrDescription, "description1"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccConfigurationConfig_description(rName, "description2"),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckConfigurationExists(ctx, t, resourceName, &configuration2),
+					resource.TestCheckResourceAttr(resourceName, names.AttrDescription, "description2"),
+					resource.TestCheckResourceAttr(resourceName, "latest_revision", "2"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccKafkaConfiguration_kafkaVersions(t *testing.T) {
+	ctx := acctest.Context(t)
+	var configuration1 kafka.DescribeConfigurationOutput
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_msk_configuration.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); testAccPreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.KafkaServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckConfigurationDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccConfigurationConfig_versions(rName),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckConfigurationExists(ctx, t, resourceName, &configuration1),
+					resource.TestCheckResourceAttr(resourceName, "kafka_versions.#", "2"),
+					resource.TestCheckTypeSetElemAttr(resourceName, "kafka_versions.*", "3.8.x"),
+					resource.TestCheckTypeSetElemAttr(resourceName, "kafka_versions.*", "3.9.x"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+		},
+	})
+}
+
+func TestAccKafkaConfiguration_serverProperties(t *testing.T) {
+	ctx := acctest.Context(t)
+	var configuration1, configuration2 kafka.DescribeConfigurationOutput
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_msk_configuration.test"
+	serverProperty1 := "auto.create.topics.enable = false"
+	serverProperty2 := "auto.create.topics.enable = true"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); testAccPreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.KafkaServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckConfigurationDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccConfigurationConfig_serverProperties(rName, serverProperty1),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckConfigurationExists(ctx, t, resourceName, &configuration1),
+					resource.TestMatchResourceAttr(resourceName, "server_properties", regexache.MustCompile(serverProperty1)),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccConfigurationConfig_serverProperties(rName, serverProperty2),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckConfigurationExists(ctx, t, resourceName, &configuration2),
+					resource.TestCheckResourceAttr(resourceName, "latest_revision", "2"),
+					resource.TestMatchResourceAttr(resourceName, "server_properties", regexache.MustCompile(serverProperty2)),
+				),
+			},
+		},
+	})
+}
+
+// https://github.com/hashicorp/terraform-provider-aws/issues/34297.
+// https://github.com/hashicorp/terraform-provider-aws/issues/15405.
+func TestAccKafkaConfiguration_serverPropertiesWithCluster(t *testing.T) {
+	ctx := acctest.Context(t)
+	var configuration1, configuration2 kafka.DescribeConfigurationOutput
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_msk_configuration.test"
+	serverProperty1 := "auto.create.topics.enable = false"
+	serverProperty2 := "auto.create.topics.enable = true"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); testAccPreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.KafkaServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckConfigurationDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccConfigurationConfig_serverPropertiesWithCluster(rName, serverProperty1),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckConfigurationExists(ctx, t, resourceName, &configuration1),
+					resource.TestMatchResourceAttr(resourceName, "server_properties", regexache.MustCompile(serverProperty1)),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccConfigurationConfig_serverPropertiesWithCluster(rName, serverProperty2),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckConfigurationExists(ctx, t, resourceName, &configuration2),
+					resource.TestCheckResourceAttr(resourceName, "latest_revision", "2"),
+					resource.TestMatchResourceAttr(resourceName, "server_properties", regexache.MustCompile(serverProperty2)),
+				),
+			},
+		},
+	})
+}
+
+func testAccCheckConfigurationDestroy(ctx context.Context, t *testing.T) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		conn := acctest.ProviderMeta(ctx, t).KafkaClient(ctx)
+
+		for _, rs := range s.RootModule().Resources {
+			if rs.Type != "aws_msk_configuration" {
+				continue
+			}
+
+			_, err := tfkafka.FindConfigurationByARN(ctx, conn, rs.Primary.ID)
+
+			if retry.NotFound(err) {
+				continue
+			}
+
+			if err != nil {
+				return err
+			}
+
+			return fmt.Errorf("MSK Configuration %s still exists", rs.Primary.ID)
+		}
+
+		return nil
+	}
+}
+
+func testAccCheckConfigurationExists(ctx context.Context, t *testing.T, n string, v *kafka.DescribeConfigurationOutput) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[n]
+		if !ok {
+			return fmt.Errorf("Not found: %s", n)
+		}
+
+		conn := acctest.ProviderMeta(ctx, t).KafkaClient(ctx)
+
+		output, err := tfkafka.FindConfigurationByARN(ctx, conn, rs.Primary.ID)
+
+		if err != nil {
+			return err
+		}
+
+		*v = *output
+
+		return nil
+	}
+}
+
+func testAccConfigurationConfig_basic(rName string) string {
+	return fmt.Sprintf(`
+resource "aws_msk_configuration" "test" {
+  name = %[1]q
+
+  server_properties = <<PROPERTIES
+auto.create.topics.enable = true
+delete.topic.enable = true
+PROPERTIES
+}
+`, rName)
+}
+
+func testAccConfigurationConfig_description(rName, description string) string {
+	return fmt.Sprintf(`
+resource "aws_msk_configuration" "test" {
+  description = %[2]q
+  name        = %[1]q
+
+  server_properties = <<PROPERTIES
+auto.create.topics.enable = true
+PROPERTIES
+}
+`, rName, description)
+}
+
+func testAccConfigurationConfig_versions(rName string) string {
+	return fmt.Sprintf(`
+resource "aws_msk_configuration" "test" {
+  kafka_versions = ["3.8.x", "3.9.x"]
+  name           = %[1]q
+
+  server_properties = <<PROPERTIES
+auto.create.topics.enable = true
+PROPERTIES
+}
+`, rName)
+}
+
+func testAccConfigurationConfig_serverProperties(rName, serverProperty string) string {
+	return fmt.Sprintf(`
+resource "aws_msk_configuration" "test" {
+  name = %[1]q
+
+  server_properties = <<PROPERTIES
+%[2]s
+PROPERTIES
+}
+`, rName, serverProperty)
+}
+
+func testAccConfigurationConfig_serverPropertiesWithCluster(rName, serverProperty string) string {
+	return acctest.ConfigCompose(testAccClusterConfig_base(rName), fmt.Sprintf(`
+resource "aws_msk_configuration" "test" {
+  name = %[1]q
+
+  server_properties = <<PROPERTIES
+%[2]s
+PROPERTIES
+}
+
+resource "aws_msk_cluster" "test" {
+  cluster_name           = %[1]q
+  kafka_version          = "3.8.x"
+  number_of_broker_nodes = 3
+
+  broker_node_group_info {
+    client_subnets  = aws_subnet.test[*].id
+    instance_type   = "kafka.t3.small"
+    security_groups = [aws_security_group.test.id]
+
+    storage_info {
+      ebs_storage_info {
+        volume_size = 10
+      }
+    }
+  }
+
+  configuration_info {
+    arn      = aws_msk_configuration.test.arn
+    revision = aws_msk_configuration.test.latest_revision
+  }
+}
+`, rName, serverProperty))
+}

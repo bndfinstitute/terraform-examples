@@ -1,0 +1,4555 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+package elbv2_test
+
+import (
+	"context"
+	"fmt"
+	"regexp"
+	"testing"
+
+	"github.com/YakDriver/regexache"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
+	awstypes "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
+	"github.com/hashicorp/aws-sdk-go-base/v2/endpoints"
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-plugin-testing/statecheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
+	"github.com/hashicorp/terraform-provider-aws/internal/acctest"
+	tfknownvalue "github.com/hashicorp/terraform-provider-aws/internal/acctest/knownvalue"
+	"github.com/hashicorp/terraform-provider-aws/internal/conns"
+	"github.com/hashicorp/terraform-provider-aws/internal/retry"
+	tfelbv2 "github.com/hashicorp/terraform-provider-aws/internal/service/elbv2"
+	"github.com/hashicorp/terraform-provider-aws/names"
+)
+
+func init() {
+	acctest.RegisterServiceErrorCheckFunc(names.ELBV2ServiceID, testAccErrorCheckSkip)
+}
+
+func testAccErrorCheckSkip(t *testing.T) resource.ErrorCheckFunc {
+	return acctest.ErrorCheckSkipMessagesContaining(t,
+		"ValidationError: Action type 'authenticate-cognito' must be one",
+		"ValidationError: Protocol 'GENEVE' must be one of",
+		"ValidationError: Type must be one of: 'application, network'",
+	)
+}
+
+func TestLBCloudWatchSuffixFromARN(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		arn    *string
+		suffix string
+	}{
+		{
+			name:   "valid suffix",
+			arn:    aws.String(`arn:aws:elasticloadbalancing:us-east-1:123456:loadbalancer/app/my-alb/abc123`), //lintignore:AWSAT003,AWSAT005
+			suffix: `app/my-alb/abc123`,
+		},
+		{
+			name:   "no suffix",
+			arn:    aws.String(`arn:aws:elasticloadbalancing:us-east-1:123456:loadbalancer`), //lintignore:AWSAT003,AWSAT005
+			suffix: ``,
+		},
+		{
+			name:   "nil ARN",
+			arn:    nil,
+			suffix: ``,
+		},
+	}
+
+	for _, tc := range cases {
+		actual := tfelbv2.SuffixFromARN(tc.arn)
+		if actual != tc.suffix {
+			t.Fatalf("bad suffix: %q\nExpected: %s\n     Got: %s", tc.name, tc.suffix, actual)
+		}
+	}
+}
+
+func TestAccELBV2LoadBalancer_ALB_basic(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albBasic(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.enabled", acctest.CtFalse),
+					matchApplicationLoadBalancerARN(ctx, resourceName, names.AttrARN, rName),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "desync_mitigation_mode", "defensive"),
+					resource.TestCheckResourceAttrSet(resourceName, names.AttrDNSName),
+					resource.TestCheckResourceAttr(resourceName, "enable_deletion_protection", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "enable_tls_version_and_cipher_suite_headers", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "enable_xff_client_port", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "enable_zonal_shift", acctest.CtFalse),
+					resource.TestCheckResourceAttrPair(resourceName, names.AttrID, resourceName, names.AttrARN),
+					resource.TestCheckResourceAttr(resourceName, "idle_timeout", "30"),
+					resource.TestCheckResourceAttr(resourceName, "internal", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, names.AttrIPAddressType, "ipv4"),
+					resource.TestCheckResourceAttr(resourceName, "ipam_pools.#", "0"),
+					resource.TestCheckResourceAttr(resourceName, "load_balancer_type", "application"),
+					resource.TestCheckResourceAttr(resourceName, names.AttrName, rName),
+					resource.TestCheckResourceAttr(resourceName, names.AttrNamePrefix, ""),
+					resource.TestCheckResourceAttr(resourceName, "security_groups.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "2"),
+					resource.TestCheckResourceAttr(resourceName, acctest.CtTagsPercent, "0"),
+					resource.TestCheckResourceAttr(resourceName, "xff_header_processing_mode", "append"),
+					resource.TestCheckResourceAttrSet(resourceName, names.AttrVPCID),
+					resource.TestCheckResourceAttrSet(resourceName, "zone_id"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_NLB_basic(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_nlbBasic(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.enabled", acctest.CtFalse),
+					matchNetworkLoadBalancerARN(ctx, resourceName, names.AttrARN, rName),
+					resource.TestCheckNoResourceAttr(resourceName, "connection_logs.#"),
+					resource.TestCheckResourceAttrSet(resourceName, names.AttrDNSName),
+					resource.TestCheckResourceAttr(resourceName, "dns_record_client_routing_policy", "any_availability_zone"),
+					resource.TestCheckResourceAttr(resourceName, "enable_deletion_protection", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "enable_zonal_shift", acctest.CtFalse),
+					resource.TestCheckResourceAttrPair(resourceName, names.AttrID, resourceName, names.AttrARN),
+					resource.TestCheckResourceAttr(resourceName, "internal", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, names.AttrIPAddressType, "ipv4"),
+					resource.TestCheckResourceAttr(resourceName, "ipam_pools.#", "0"),
+					resource.TestCheckResourceAttr(resourceName, "load_balancer_type", "network"),
+					resource.TestCheckResourceAttr(resourceName, names.AttrName, rName),
+					resource.TestCheckResourceAttr(resourceName, names.AttrNamePrefix, ""),
+					resource.TestCheckResourceAttr(resourceName, "subnet_mapping.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, acctest.CtTagsPercent, "1"),
+					resource.TestCheckResourceAttr(resourceName, "tags.Name", rName),
+					resource.TestCheckResourceAttrSet(resourceName, "zone_id"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_GWLB_basic(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); testAccPreCheckGatewayLoadBalancer(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_gwlbBasic(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					matchGatewayLoadBalancerARN(ctx, resourceName, names.AttrARN, rName),
+					resource.TestCheckResourceAttr(resourceName, "load_balancer_type", string(awstypes.LoadBalancerTypeEnumGateway)),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+				ImportStateVerifyIgnore: []string{
+					"drop_invalid_header_fields",
+					"enable_http2",
+					"enable_waf_fail_open",
+					"idle_timeout",
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_disappears(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albBasic(rName),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					acctest.CheckSDKResourceDisappears(ctx, t, tfelbv2.ResourceLoadBalancer(), resourceName),
+				),
+				ExpectNonEmptyPlan: true,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+					PostApplyPostRefresh: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_nameGenerated(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albNameGenerated(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					acctest.CheckResourceAttrNameGeneratedWithPrefix(resourceName, names.AttrName, "tf-lb-"),
+					resource.TestCheckResourceAttr(resourceName, names.AttrNamePrefix, "tf-lb-"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+				ImportStateVerifyIgnore: []string{
+					"drop_invalid_header_fields",
+					"enable_http2",
+					"enable_waf_fail_open",
+					"idle_timeout",
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_nameGeneratedForZeroValue(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albZeroValueName(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					acctest.CheckResourceAttrNameGeneratedWithPrefix(resourceName, names.AttrName, "tf-lb-"),
+					resource.TestCheckResourceAttr(resourceName, names.AttrNamePrefix, "tf-lb-"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_namePrefix(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albNamePrefix(rName, "tf-px-"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					acctest.CheckResourceAttrNameFromPrefix(resourceName, names.AttrName, "tf-px-"),
+					resource.TestCheckResourceAttr(resourceName, names.AttrNamePrefix, "tf-px-"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+				ImportStateVerifyIgnore: []string{
+					"drop_invalid_header_fields",
+					"enable_http2",
+					"enable_waf_fail_open",
+					"idle_timeout",
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_duplicateName(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albBasic(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, names.AttrName, rName),
+				),
+			},
+			{
+				Config:      testAccLoadBalancerConfig_albDuplicateName(rName),
+				ExpectError: regexache.MustCompile(`already exists`),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_ipv6SubnetMapping(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	importStateVerifyIgnore := []string{
+		"drop_invalid_header_fields",
+		"enable_http2",
+		"idle_timeout",
+	}
+	// GovCloud doesn't support dns_record_client_routing_policy.
+	if acctest.Partition() == endpoints.AwsUsGovPartitionID {
+		importStateVerifyIgnore = append(importStateVerifyIgnore, "dns_record_client_routing_policy")
+	}
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albIPv6(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestMatchTypeSetElemNestedAttrs(resourceName, "subnet_mapping.*", map[string]*regexp.Regexp{
+						"ipv6_address": regexache.MustCompile("[0-6a-f]+:[0-6a-f:]+"),
+					}),
+				),
+			},
+			{
+				ResourceName:            resourceName,
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: importStateVerifyIgnore,
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_GWLB_enableCrossZoneLoadBalancing(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); testAccPreCheckGatewayLoadBalancer(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_gwlbEnableCrossZoneBalancing(rName, true),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					matchGatewayLoadBalancerARN(ctx, resourceName, names.AttrARN, rName),
+					resource.TestCheckResourceAttr(resourceName, "load_balancer_type", string(awstypes.LoadBalancerTypeEnumGateway)),
+					resource.TestCheckResourceAttr(resourceName, "enable_cross_zone_load_balancing", acctest.CtTrue),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+				ImportStateVerifyIgnore: []string{
+					"drop_invalid_header_fields",
+					"enable_http2",
+					"enable_waf_fail_open",
+					"idle_timeout",
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_gwlbEnableCrossZoneBalancing(rName, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					matchGatewayLoadBalancerARN(ctx, resourceName, names.AttrARN, rName),
+					resource.TestCheckResourceAttr(resourceName, "load_balancer_type", string(awstypes.LoadBalancerTypeEnumGateway)),
+					resource.TestCheckResourceAttr(resourceName, "enable_cross_zone_load_balancing", acctest.CtFalse),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_outpost(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); acctest.PreCheckOutpostsOutposts(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albOutpost(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.enabled", acctest.CtFalse),
+					matchApplicationLoadBalancerARN(ctx, resourceName, names.AttrARN, rName),
+					resource.TestCheckResourceAttrSet(resourceName, names.AttrDNSName),
+					resource.TestCheckResourceAttr(resourceName, "enable_deletion_protection", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "idle_timeout", "30"),
+					resource.TestCheckResourceAttr(resourceName, names.AttrIPAddressType, "ipv4"),
+					resource.TestCheckResourceAttr(resourceName, "load_balancer_type", "application"),
+					resource.TestCheckResourceAttr(resourceName, names.AttrName, rName),
+					resource.TestCheckResourceAttr(resourceName, "security_groups.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, acctest.CtTagsPercent, "1"),
+					resource.TestCheckResourceAttr(resourceName, "tags.Name", rName),
+					resource.TestCheckResourceAttr(resourceName, "subnet_mapping.#", "1"),
+					resource.TestCheckResourceAttrSet(resourceName, "subnet_mapping.0.outpost_id"),
+					resource.TestCheckResourceAttrSet(resourceName, "customer_owned_ipv4_pool"),
+					resource.TestCheckResourceAttrSet(resourceName, names.AttrVPCID),
+					resource.TestCheckResourceAttrSet(resourceName, "zone_id"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_NLB_allocationID(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	resourceName := "aws_lb.test"
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_nlbAllocationID(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, names.AttrName, rName),
+					resource.TestCheckResourceAttr(resourceName, "internal", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, names.AttrIPAddressType, "ipv4"),
+					resource.TestCheckResourceAttrSet(resourceName, "zone_id"),
+					resource.TestCheckResourceAttrSet(resourceName, names.AttrDNSName),
+					matchNetworkLoadBalancerARN(ctx, resourceName, names.AttrARN, rName),
+					resource.TestCheckResourceAttr(resourceName, "load_balancer_type", "network"),
+					resource.TestCheckResourceAttr(resourceName, "enable_deletion_protection", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "subnet_mapping.#", "2"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_NLB_privateIPv4Address(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	var importStateVerifyIgnore []string
+	// GovCloud doesn't support dns_record_client_routing_policy.
+	if acctest.Partition() == endpoints.AwsUsGovPartitionID {
+		importStateVerifyIgnore = append(importStateVerifyIgnore, "dns_record_client_routing_policy")
+	}
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_nlbPrivateIPV4Address(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("subnet_mapping"), knownvalue.SetSizeExact(2)),
+				},
+			},
+			{
+				ResourceName:            resourceName,
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: importStateVerifyIgnore,
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_backwardsCompatibility(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_alb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albBackwardsCompatibility(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, names.AttrName, rName),
+					resource.TestCheckResourceAttr(resourceName, "internal", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "2"),
+					resource.TestCheckResourceAttr(resourceName, "security_groups.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, acctest.CtTagsPercent, "1"),
+					resource.TestCheckResourceAttr(resourceName, "tags.Name", rName),
+					resource.TestCheckResourceAttr(resourceName, "enable_deletion_protection", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "idle_timeout", "30"),
+					resource.TestCheckResourceAttr(resourceName, names.AttrIPAddressType, "ipv4"),
+					resource.TestCheckResourceAttr(resourceName, "load_balancer_type", "application"),
+					resource.TestCheckResourceAttrSet(resourceName, names.AttrVPCID),
+					resource.TestCheckResourceAttrSet(resourceName, "zone_id"),
+					resource.TestCheckResourceAttrSet(resourceName, names.AttrDNSName),
+					matchApplicationLoadBalancerARN(ctx, resourceName, names.AttrARN, rName),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_NLB_updateCrossZone(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_nlbCrossZone(rName, true),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "load_balancing.cross_zone.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "enable_cross_zone_load_balancing", acctest.CtTrue),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbCrossZone(rName, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "load_balancing.cross_zone.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "enable_cross_zone_load_balancing", acctest.CtFalse),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbCrossZone(rName, true),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "load_balancing.cross_zone.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "enable_cross_zone_load_balancing", acctest.CtTrue),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_NLB_updateZonalShift(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_nlbZonalShift(rName, true),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "zonal_shift.config.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "enable_zonal_shift", acctest.CtTrue),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbZonalShift(rName, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "zonal_shift.config.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "enable_zonal_shift", acctest.CtFalse),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbZonalShift(rName, true),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "zonal_shift.config.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "enable_zonal_shift", acctest.CtTrue),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_updateZonalShift(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albZonalShift(rName, true),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "zonal_shift.config.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "enable_zonal_shift", acctest.CtTrue),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albZonalShift(rName, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "zonal_shift.config.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "enable_zonal_shift", acctest.CtFalse),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albZonalShift(rName, true),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "zonal_shift.config.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "enable_zonal_shift", acctest.CtTrue),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_updateHTTP2(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albEnableHTTP2(rName, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http2.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "enable_http2", acctest.CtFalse),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albEnableHTTP2(rName, true),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http2.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "enable_http2", acctest.CtTrue),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albEnableHTTP2(rName, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http2.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "enable_http2", acctest.CtFalse),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_clientKeepAlive(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albClientKeepAlive(rName, 3600),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, tfelbv2.LoadBalancerAttributeClientKeepAliveSeconds, "3600"),
+					resource.TestCheckResourceAttr(resourceName, "client_keep_alive", "3600"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albClientKeepAlive(rName, 7200),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, tfelbv2.LoadBalancerAttributeClientKeepAliveSeconds, "7200"),
+					resource.TestCheckResourceAttr(resourceName, "client_keep_alive", "7200"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albClientKeepAlive(rName, 14400),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, tfelbv2.LoadBalancerAttributeClientKeepAliveSeconds, "14400"),
+					resource.TestCheckResourceAttr(resourceName, "client_keep_alive", "14400"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_updateDropInvalidHeaderFields(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albEnableDropInvalidHeaderFields(rName, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http.drop_invalid_header_fields.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "drop_invalid_header_fields", acctest.CtFalse),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albEnableDropInvalidHeaderFields(rName, true),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http.drop_invalid_header_fields.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "drop_invalid_header_fields", acctest.CtTrue),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albEnableDropInvalidHeaderFields(rName, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http.drop_invalid_header_fields.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "drop_invalid_header_fields", acctest.CtFalse),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_updatePreserveHostHeader(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albEnablePreserveHostHeader(rName, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http.preserve_host_header.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "preserve_host_header", acctest.CtFalse),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albEnablePreserveHostHeader(rName, true),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http.preserve_host_header.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "preserve_host_header", acctest.CtTrue),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albEnablePreserveHostHeader(rName, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http.preserve_host_header.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "preserve_host_header", acctest.CtFalse),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_updateDeletionProtection(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albEnableDeletionProtection(rName, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "deletion_protection.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "enable_deletion_protection", acctest.CtFalse),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albEnableDeletionProtection(rName, true),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "deletion_protection.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "enable_deletion_protection", acctest.CtTrue),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albEnableDeletionProtection(rName, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "deletion_protection.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "enable_deletion_protection", acctest.CtFalse),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_updateWAFFailOpen(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albEnableWAFFailOpen(rName, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "enable_waf_fail_open", acctest.CtFalse),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccLoadBalancerConfig_albEnableWAFFailOpen(rName, true),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "enable_waf_fail_open", acctest.CtTrue),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albEnableWAFFailOpen(rName, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "enable_waf_fail_open", acctest.CtFalse),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_updateIPAddressType(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albIPAddressType(rName, "ipv4"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, names.AttrIPAddressType, "ipv4"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albIPAddressType(rName, "dualstack"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, names.AttrIPAddressType, "dualstack"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albIPAddressType(rName, "dualstack-without-public-ipv4"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, names.AttrIPAddressType, "dualstack-without-public-ipv4"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_ipamPoolsBasic(t *testing.T) {
+	acctest.Skip(t, "failed-deprovision (The CIDR has one or more allocations) errors deleting IPAM pool CIDRs")
+
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.Test(ctx, t, resource.TestCase{ // nosemgrep:ci.semgrep.acctest.testcase-use-paralleltest -- skipped test, IPAM pools are scarce shared resources
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albIPAMPoolsBasic(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, names.AttrIPAddressType, "ipv4"),
+					resource.TestCheckResourceAttrSet(resourceName, "ipam_pools.0.ipv4_ipam_pool_id"),
+				),
+			},
+			{ // Destroy the ALB first for eventual consistency check. IPAM pool EIP is not released after replaced.
+				Config: testAccLoadBalancerConfig_albIPAMPoolsBasicDestroyALB(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerDestroy(ctx, t),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_ipamPoolsModify(t *testing.T) {
+	acctest.Skip(t, "failed-deprovision (The CIDR has one or more allocations) errors deleting IPAM pool CIDRs")
+
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.Test(ctx, t, resource.TestCase{ // nosemgrep:ci.semgrep.acctest.testcase-use-paralleltest -- skipped test, IPAM pools are scarce shared resources
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+
+		Steps: []resource.TestStep{
+			{ // Create the load balancer with an IPAM pool
+				Config: testAccLoadBalancerConfig_albIPAMPoolsBasic(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, names.AttrIPAddressType, "ipv4"),
+					resource.TestCheckResourceAttrSet(resourceName, "ipam_pools.0.ipv4_ipam_pool_id"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{ // Replace the IPAM pool
+				Config: testAccLoadBalancerConfig_albIPAMPoolsModify(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, names.AttrIPAddressType, "ipv4"),
+					resource.TestCheckResourceAttrSet(resourceName, "ipam_pools.0.ipv4_ipam_pool_id"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{ // Destroy the ALB first for eventual consistency check. IPAM pool EIP is not released after replaced.
+				Config: testAccLoadBalancerConfig_albIPAMPoolsModifyDestroyALB(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerDestroy(ctx, t),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_ipamPoolsUnassign(t *testing.T) {
+	acctest.Skip(t, "failed-deprovision (The CIDR has one or more allocations) errors deleting IPAM pool CIDRs")
+
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.Test(ctx, t, resource.TestCase{ // nosemgrep:ci.semgrep.acctest.testcase-use-paralleltest -- skipped test, IPAM pools are scarce shared resources
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albIPAMPoolsBasic(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, names.AttrIPAddressType, "ipv4"),
+					resource.TestCheckResourceAttrSet(resourceName, "ipam_pools.0.ipv4_ipam_pool_id"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccLoadBalancerConfig_albIPAMPoolsUnassign(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, names.AttrIPAddressType, "ipv4"),
+					resource.TestCheckNoResourceAttr(resourceName, "ipam_pools.0.ipv4_ipam_pool_id"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{ // Destroy the ALB first for eventual consistency check. IPAM pool EIP is not released after removed.
+				Config: testAccLoadBalancerConfig_albIPAMPoolsUnassignDestroyALB(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerDestroy(ctx, t),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_updatedSecurityGroups(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck: func() {
+			acctest.PreCheck(ctx, t)
+			// GovCloud Regions don't always have 3 AZs.
+			acctest.PreCheckPartitionNot(t, endpoints.AwsUsGovPartitionID)
+		},
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albUpdateSecurityGroups(rName, 1),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "security_groups.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "enforce_security_group_inbound_rules_on_private_link_traffic", ""),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albUpdateSecurityGroups(rName, 2),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "security_groups.#", "2"),
+					resource.TestCheckResourceAttr(resourceName, "enforce_security_group_inbound_rules_on_private_link_traffic", ""),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albUpdateSecurityGroups(rName, 1),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "security_groups.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "enforce_security_group_inbound_rules_on_private_link_traffic", ""),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_addSubnet(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck: func() {
+			acctest.PreCheck(ctx, t)
+			// GovCloud Regions don't always have 3 AZs.
+			acctest.PreCheckPartitionNot(t, endpoints.AwsUsGovPartitionID)
+		},
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albSubnetCount(rName, 3, 2),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "subnet_mapping.#", "2"),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "2"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albSubnetCount(rName, 3, 3),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "subnet_mapping.#", "3"),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "3"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_deleteSubnet(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck: func() {
+			acctest.PreCheck(ctx, t)
+			// GovCloud Regions don't always have 3 AZs.
+			acctest.PreCheckPartitionNot(t, endpoints.AwsUsGovPartitionID)
+		},
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albSubnetCount(rName, 3, 3),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "subnet_mapping.#", "3"),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "3"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albSubnetCount(rName, 3, 2),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "subnet_mapping.#", "2"),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "2"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_addSubnetMapping(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck: func() {
+			acctest.PreCheck(ctx, t)
+			// GovCloud Regions don't always have 3 AZs.
+			acctest.PreCheckPartitionNot(t, endpoints.AwsUsGovPartitionID)
+		},
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albSubnetMappingCount(rName, 2),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "subnet_mapping.#", "2"),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "2"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albSubnetMappingCount(rName, 3),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "subnet_mapping.#", "3"),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "3"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_deleteSubnetMapping(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck: func() {
+			acctest.PreCheck(ctx, t)
+			// GovCloud Regions don't always have 3 AZs.
+			acctest.PreCheckPartitionNot(t, endpoints.AwsUsGovPartitionID)
+		},
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albSubnetMappingCount(rName, 3),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "subnet_mapping.#", "3"),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "3"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albSubnetMappingCount(rName, 2),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "subnet_mapping.#", "2"),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "2"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+		},
+	})
+}
+
+// TestAccELBV2LoadBalancer_noSecurityGroup regression tests the issue in #8264,
+// where if an ALB is created without a security group, a default one
+// is assigned.
+func TestAccELBV2LoadBalancer_ALB_noSecurityGroup(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albNoSecurityGroups(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, names.AttrName, rName),
+					resource.TestCheckResourceAttr(resourceName, "internal", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "2"),
+					resource.TestCheckResourceAttr(resourceName, "security_groups.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "enable_deletion_protection", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "idle_timeout", "30"),
+					resource.TestCheckResourceAttrSet(resourceName, names.AttrVPCID),
+					resource.TestCheckResourceAttrSet(resourceName, "zone_id"),
+					resource.TestCheckResourceAttrSet(resourceName, names.AttrDNSName),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_accessLogs(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albAccessLogs(true, rName, ""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.prefix", ""),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccLoadBalancerConfig_albAccessLogs(false, rName, ""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.enabled", acctest.CtFalse),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.prefix", ""),
+				),
+			},
+			{
+				Config: testAccLoadBalancerConfig_albAccessLogs(true, rName, ""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.prefix", ""),
+				),
+			},
+			{
+				Config: testAccLoadBalancerConfig_albAccessLogsNoBlocks(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.enabled", acctest.CtFalse),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.prefix", ""),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_accessLogsPrefix(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albAccessLogs(true, rName, "prefix1"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.prefix", "prefix1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.prefix", "prefix1"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccLoadBalancerConfig_albAccessLogs(true, rName, ""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.prefix", ""),
+				),
+			},
+			{
+				Config: testAccLoadBalancerConfig_albAccessLogs(true, rName, "prefix1"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.prefix", "prefix1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.prefix", "prefix1"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_connectionLogs(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albConnectionLogs(true, rName, ""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.prefix", ""),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccLoadBalancerConfig_albConnectionLogs(false, rName, ""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.enabled", acctest.CtFalse),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.prefix", ""),
+				),
+			},
+			{
+				Config: testAccLoadBalancerConfig_albConnectionLogs(true, rName, ""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.prefix", ""),
+				),
+			},
+			{
+				Config: testAccLoadBalancerConfig_albConnectionLogsNoBlocks(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.enabled", acctest.CtFalse),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.prefix", ""),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_connectionLogsPrefix(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albConnectionLogs(true, rName, "prefix1"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.prefix", "prefix1"),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.prefix", "prefix1"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccLoadBalancerConfig_albConnectionLogs(true, rName, ""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.prefix", ""),
+				),
+			},
+			{
+				Config: testAccLoadBalancerConfig_albConnectionLogs(true, rName, "prefix1"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "connection_logs.s3.prefix", "prefix1"),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "connection_logs.0.prefix", "prefix1"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_healthCheckLogs(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albHealthCheckLogs(true, rName, ""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.prefix", ""),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccLoadBalancerConfig_albHealthCheckLogs(false, rName, ""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.enabled", acctest.CtFalse),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.prefix", ""),
+				),
+			},
+			{
+				Config: testAccLoadBalancerConfig_albHealthCheckLogs(true, rName, ""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.prefix", ""),
+				),
+			},
+			{
+				Config: testAccLoadBalancerConfig_albHealthCheckLogsNoBlocks(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.enabled", acctest.CtFalse),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.prefix", ""),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_healthCheckLogsPrefix(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albHealthCheckLogs(true, rName, "prefix1"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.prefix", "prefix1"),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.prefix", "prefix1"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccLoadBalancerConfig_albHealthCheckLogs(true, rName, ""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.prefix", ""),
+				),
+			},
+			{
+				Config: testAccLoadBalancerConfig_albHealthCheckLogs(true, rName, "prefix1"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "health_check_logs.s3.prefix", "prefix1"),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "health_check_logs.0.prefix", "prefix1"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_NLB_accessLogs(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	var importStateVerifyIgnore []string
+	// GovCloud doesn't support dns_record_client_routing_policy.
+	if acctest.Partition() == endpoints.AwsUsGovPartitionID {
+		importStateVerifyIgnore = append(importStateVerifyIgnore, "dns_record_client_routing_policy")
+	}
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_nlbAccessLogs(true, rName, ""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.prefix", ""),
+				),
+			},
+			{
+				ResourceName:            resourceName,
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: importStateVerifyIgnore,
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbAccessLogs(false, rName, ""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.enabled", acctest.CtFalse),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.prefix", ""),
+				),
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbAccessLogs(true, rName, ""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.prefix", ""),
+				),
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbAccessLogsNoBlocks(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.enabled", acctest.CtFalse),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.prefix", ""),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_NLB_accessLogsPrefix(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	var importStateVerifyIgnore []string
+	// GovCloud doesn't support dns_record_client_routing_policy.
+	if acctest.Partition() == endpoints.AwsUsGovPartitionID {
+		importStateVerifyIgnore = append(importStateVerifyIgnore, "dns_record_client_routing_policy")
+	}
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_nlbAccessLogs(true, rName, "prefix1"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.prefix", "prefix1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.prefix", "prefix1"),
+				),
+			},
+			{
+				ResourceName:            resourceName,
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: importStateVerifyIgnore,
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbAccessLogs(true, rName, ""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.prefix", ""),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.prefix", ""),
+				),
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbAccessLogs(true, rName, "prefix1"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.bucket", rName),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.enabled", acctest.CtTrue),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "access_logs.s3.prefix", "prefix1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.bucket", rName),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "access_logs.0.prefix", "prefix1"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_NLB_updateDNSRecordClientRoutingPolicy(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck: func() {
+			acctest.PreCheck(ctx, t)
+			// GovCloud doesn't support dns_record_client_routing_policy.
+			acctest.PreCheckPartitionNot(t, endpoints.AwsUsGovPartitionID)
+		},
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_nlbDNSRecordClientRoutingPolicyAffinity(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "dns_record_client_routing_policy", "availability_zone_affinity"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbDNSRecordClientRoutingPolicyPartialAffinity(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "dns_record_client_routing_policy", "partial_availability_zone_affinity"),
+				),
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbDNSRecordClientRoutingPolicyAnyAvailabilityZone(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "dns_record_client_routing_policy", "any_availability_zone"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_NLB_noSecurityGroups(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_nlbNoSecurityGroups(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New(names.AttrSecurityGroups), knownvalue.SetSizeExact(0)),
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_NLB_updateSecurityGroups(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_nlbSecurityGroups(rName, 0),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("enforce_security_group_inbound_rules_on_private_link_traffic"), knownvalue.StringExact("")),
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New(names.AttrSecurityGroups), knownvalue.SetSizeExact(0)),
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbSecurityGroups(rName, 1),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionReplace),
+					},
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("enforce_security_group_inbound_rules_on_private_link_traffic"), knownvalue.StringExact("")),
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New(names.AttrSecurityGroups), knownvalue.SetSizeExact(1)),
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbSecurityGroups(rName, 2),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("enforce_security_group_inbound_rules_on_private_link_traffic"), knownvalue.StringExact("")),
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New(names.AttrSecurityGroups), knownvalue.SetSizeExact(2)),
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbSecurityGroups(rName, 2),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionNoop),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbSecurityGroups(rName, 0),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "security_groups.#", "0"),
+					resource.TestCheckResourceAttr(resourceName, "enforce_security_group_inbound_rules_on_private_link_traffic", ""),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionReplace),
+					},
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("enforce_security_group_inbound_rules_on_private_link_traffic"), knownvalue.StringExact("")),
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New(names.AttrSecurityGroups), knownvalue.SetSizeExact(0)),
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_NLB_updateSecurityGroupsToUnknown(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_nlbNoSecurityGroups(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New(names.AttrSecurityGroups), knownvalue.SetSizeExact(0)),
+				},
+			},
+			{
+				// Add a security group whose ID is unknown at plan time.
+				// The NLB must be recreated because NLBs don't support
+				// adding security groups after creation.
+				Config: testAccLoadBalancerConfig_nlbSecurityGroupsUnknown(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionReplace),
+					},
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New(names.AttrSecurityGroups), knownvalue.SetSizeExact(1)),
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_NLB_enforcePrivateLink(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	var importStateVerifyIgnore []string
+	// GovCloud doesn't support dns_record_client_routing_policy.
+	if acctest.Partition() == endpoints.AwsUsGovPartitionID {
+		importStateVerifyIgnore = append(importStateVerifyIgnore, "dns_record_client_routing_policy")
+	}
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_nlbSecurityGroupsEnforcePrivateLink(rName, 1, "off"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "security_groups.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "enforce_security_group_inbound_rules_on_private_link_traffic", "off"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				ResourceName:            resourceName,
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: importStateVerifyIgnore,
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbSecurityGroups(rName, 1),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "security_groups.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "enforce_security_group_inbound_rules_on_private_link_traffic", "off"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionNoop),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbSecurityGroupsEnforcePrivateLink(rName, 1, "on"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "security_groups.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "enforce_security_group_inbound_rules_on_private_link_traffic", "on"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbSecurityGroupsEnforcePrivateLink(rName, 1, "off"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "security_groups.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "enforce_security_group_inbound_rules_on_private_link_traffic", "off"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbSecurityGroups(rName, 1),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "security_groups.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "enforce_security_group_inbound_rules_on_private_link_traffic", "off"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionNoop),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_NLB_addSubnet(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck: func() {
+			acctest.PreCheck(ctx, t)
+			// GovCloud Regions don't always have 3 AZs.
+			acctest.PreCheckPartitionNot(t, endpoints.AwsUsGovPartitionID)
+		},
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_nlbSubnetCount(rName, 2),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "2"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbSubnetCount(rName, 3),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "3"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_NLB_deleteSubnet(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck: func() {
+			acctest.PreCheck(ctx, t)
+			// GovCloud Regions don't always have 3 AZs.
+			acctest.PreCheckPartitionNot(t, endpoints.AwsUsGovPartitionID)
+		},
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_nlbSubnetCount(rName, 3),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "3"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbSubnetCount(rName, 2),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "2"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionReplace),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_NLB_addSubnetMapping(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck: func() {
+			acctest.PreCheck(ctx, t)
+			// GovCloud Regions don't always have 3 AZs.
+			acctest.PreCheckPartitionNot(t, endpoints.AwsUsGovPartitionID)
+		},
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_nlbSubnetMappingCount(rName, false, false, 2),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "subnet_mapping.#", "2"),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "2"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbSubnetMappingCount(rName, false, false, 3),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "subnet_mapping.#", "3"),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "3"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_NLB_deleteSubnetMapping(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck: func() {
+			acctest.PreCheck(ctx, t)
+			// GovCloud Regions don't always have 3 AZs.
+			acctest.PreCheckPartitionNot(t, endpoints.AwsUsGovPartitionID)
+		},
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_nlbSubnetMappingCount(rName, false, false, 3),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "subnet_mapping.#", "3"),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "3"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbSubnetMappingCount(rName, false, false, 2),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "subnet_mapping.#", "2"),
+					resource.TestCheckResourceAttr(resourceName, "subnets.#", "2"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionReplace),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_NLB_secondaryIPAddresses(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck: func() {
+			acctest.PreCheck(ctx, t)
+			// GovCloud Regions don't always have 3 AZs.
+			acctest.PreCheckPartitionNot(t, endpoints.AwsUsGovPartitionID)
+		},
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_nlbBasic(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "secondary_ips_auto_assigned_per_subnet", "0"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbSecondaryIPAddresses(rName, 3, 7),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "secondary_ips_auto_assigned_per_subnet", "7"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						// Increasing secondary IP count should not force recreation
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbSecondaryIPAddresses(rName, 3, 3),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "secondary_ips_auto_assigned_per_subnet", "3"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						// Decreasing secondary IP count should force recreation
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionReplace),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_updateDesyncMitigationMode(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albDesyncMitigationMode(rName, "strictest"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http.desync_mitigation_mode", "strictest"),
+					resource.TestCheckResourceAttr(resourceName, "desync_mitigation_mode", "strictest"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccLoadBalancerConfig_albDesyncMitigationMode(rName, "monitor"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http.desync_mitigation_mode", "monitor"),
+					resource.TestCheckResourceAttr(resourceName, "desync_mitigation_mode", "monitor"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_albDesyncMitigationMode(rName, "defensive"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http.desync_mitigation_mode", "defensive"),
+					resource.TestCheckResourceAttr(resourceName, "desync_mitigation_mode", "defensive"),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_updateTLSVersionAndCipherSuite(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albTLSCipherSuiteEnabled(rName, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http.x_amzn_tls_version_and_cipher_suite.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "enable_tls_version_and_cipher_suite_headers", acctest.CtFalse),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccLoadBalancerConfig_albTLSCipherSuiteEnabled(rName, true),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http.x_amzn_tls_version_and_cipher_suite.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "enable_tls_version_and_cipher_suite_headers", acctest.CtTrue),
+				),
+			},
+			{
+				Config: testAccLoadBalancerConfig_albTLSCipherSuiteEnabled(rName, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http.x_amzn_tls_version_and_cipher_suite.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "enable_tls_version_and_cipher_suite_headers", acctest.CtFalse),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_updateXffHeaderProcessingMode(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albXFFHeaderProcessingMode(rName, "append"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http.xff_header_processing.mode", "append"),
+					resource.TestCheckResourceAttr(resourceName, "xff_header_processing_mode", "append"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccLoadBalancerConfig_albXFFHeaderProcessingMode(rName, "preserve"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http.xff_header_processing.mode", "preserve"),
+					resource.TestCheckResourceAttr(resourceName, "xff_header_processing_mode", "preserve"),
+				),
+			},
+			{
+				Config: testAccLoadBalancerConfig_albXFFHeaderProcessingMode(rName, "remove"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http.xff_header_processing.mode", "remove"),
+					resource.TestCheckResourceAttr(resourceName, "xff_header_processing_mode", "remove"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_updateXffClientPort(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albXFFClientPort(rName, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http.xff_client_port.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "enable_xff_client_port", acctest.CtFalse),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccLoadBalancerConfig_albXFFClientPort(rName, true),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http.xff_client_port.enabled", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "enable_xff_client_port", acctest.CtTrue),
+				),
+			},
+			{
+				Config: testAccLoadBalancerConfig_albXFFClientPort(rName, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					testAccCheckLoadBalancerAttribute(ctx, t, resourceName, "routing.http.xff_client_port.enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "enable_xff_client_port", acctest.CtFalse),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_updateCapacityReservation(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albCapacityReservation(rName, 100),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "minimum_load_balancer_capacity.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "minimum_load_balancer_capacity.0.capacity_units", "100"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccLoadBalancerConfig_albBasic(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "minimum_load_balancer_capacity.#", "0"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_ALB_moreThan20Attributes(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_albMoreThan20Attributes(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+		},
+	})
+}
+
+func TestAccELBV2LoadBalancer_NLB_enablePrefixForIPv6SourceNAT(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.LoadBalancer
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_lb.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.ELBV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckLoadBalancerDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLoadBalancerConfig_nlbEnablePrefixForIPv6SourceNAT(rName, awstypes.EnablePrefixForIpv6SourceNatEnumOff),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("enable_prefix_for_ipv6_source_nat"), tfknownvalue.StringExact(awstypes.EnablePrefixForIpv6SourceNatEnumOff)),
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbEnablePrefixForIPv6SourceNAT(rName, awstypes.EnablePrefixForIpv6SourceNatEnumOn),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("enable_prefix_for_ipv6_source_nat"), tfknownvalue.StringExact(awstypes.EnablePrefixForIpv6SourceNatEnumOn)),
+				},
+			},
+			{
+				Config: testAccLoadBalancerConfig_nlbEnablePrefixForIPv6SourceNAT(rName, awstypes.EnablePrefixForIpv6SourceNatEnumOff),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckLoadBalancerExists(ctx, t, resourceName, &conf),
+				),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("enable_prefix_for_ipv6_source_nat"), tfknownvalue.StringExact(awstypes.EnablePrefixForIpv6SourceNatEnumOff)),
+				},
+			},
+		},
+	})
+}
+
+func testAccCheckLoadBalancerExists(ctx context.Context, t *testing.T, n string, v *awstypes.LoadBalancer) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[n]
+		if !ok {
+			return fmt.Errorf("Not found: %s", n)
+		}
+
+		conn := acctest.ProviderMeta(ctx, t).ELBV2Client(ctx)
+
+		output, err := tfelbv2.FindLoadBalancerByARN(ctx, conn, rs.Primary.ID)
+
+		if err != nil {
+			return err
+		}
+
+		*v = *output
+
+		return nil
+	}
+}
+
+func testAccCheckLoadBalancerAttribute(ctx context.Context, t *testing.T, n, key, value string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[n]
+		if !ok {
+			return fmt.Errorf("Not found: %s", n)
+		}
+
+		conn := acctest.ProviderMeta(ctx, t).ELBV2Client(ctx)
+
+		attributes, err := tfelbv2.FindLoadBalancerAttributesByARN(ctx, conn, rs.Primary.ID)
+
+		if err != nil {
+			return err
+		}
+
+		for _, v := range attributes {
+			if aws.ToString(v.Key) == key {
+				got := aws.ToString(v.Value)
+				if got == value {
+					return nil
+				}
+
+				return fmt.Errorf("ELBv2 Load Balancer (%s) attribute (%s) = %v, want %v", rs.Primary.ID, key, got, value)
+			}
+		}
+
+		return fmt.Errorf("ELBv2 Load Balancer (%s) attribute (%s) not found", rs.Primary.ID, key)
+	}
+}
+
+func testAccCheckLoadBalancerDestroy(ctx context.Context, t *testing.T) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		for _, rs := range s.RootModule().Resources {
+			if rs.Type != "aws_lb" && rs.Type != "aws_alb" {
+				continue
+			}
+
+			ctx = conns.NewResourceContext(ctx, "", "", "", rs.Primary.Attributes[names.AttrRegion])
+			conn := acctest.ProviderMeta(ctx, t).ELBV2Client(ctx)
+
+			_, err := tfelbv2.FindLoadBalancerByARN(ctx, conn, rs.Primary.ID)
+
+			if retry.NotFound(err) {
+				continue
+			}
+
+			if err != nil {
+				return err
+			}
+
+			return fmt.Errorf("ELBv2 Load Balancer %s still exists", rs.Primary.ID)
+		}
+
+		return nil
+	}
+}
+
+func testAccPreCheckGatewayLoadBalancer(ctx context.Context, t *testing.T) {
+	conn := acctest.ProviderMeta(ctx, t).ELBV2Client(ctx)
+
+	input := &elasticloadbalancingv2.DescribeAccountLimitsInput{}
+
+	output, err := conn.DescribeAccountLimits(ctx, input)
+
+	if acctest.PreCheckSkipError(err) {
+		t.Skipf("skipping acceptance testing: %s", err)
+	}
+
+	if err != nil {
+		t.Fatalf("unexpected ELBv2 Gateway Load Balancer PreCheck error: %s", err)
+	}
+
+	if output == nil {
+		t.Fatal("unexpected ELBv2 Gateway Load Balancer PreCheck error: empty response")
+	}
+
+	for _, limit := range output.Limits {
+		if aws.ToString(limit.Name) == "gateway-load-balancers" {
+			return
+		}
+	}
+
+	t.Skip("skipping acceptance testing: region does not support ELBv2 Gateway Load Balancers")
+}
+
+func matchApplicationLoadBalancerARN(ctx context.Context, resourceName, attributeName, lbName string) resource.TestCheckFunc {
+	return acctest.MatchResourceAttrRegionalARN(ctx, resourceName, attributeName, "elasticloadbalancing", regexache.MustCompile(applicationLoadBalancerARNPattern(lbName)+`$`))
+}
+
+func matchGatewayLoadBalancerARN(ctx context.Context, resourceName, attributeName, lbName string) resource.TestCheckFunc {
+	return acctest.MatchResourceAttrRegionalARN(ctx, resourceName, attributeName, "elasticloadbalancing", regexache.MustCompile(gatewayLoadBalancerARNPattern(lbName)+`$`))
+}
+
+func matchNetworkLoadBalancerARN(ctx context.Context, resourceName, attributeName, lbName string) resource.TestCheckFunc {
+	return acctest.MatchResourceAttrRegionalARN(ctx, resourceName, attributeName, "elasticloadbalancing", regexache.MustCompile(networkLoadBalancerARNPattern(lbName)+`$`))
+}
+
+func applicationLoadBalancerARNPattern(lbName string) string {
+	return loadBalancerARNPattern(applicationPattern(lbName))
+}
+
+func gatewayLoadBalancerARNPattern(lbName string) string {
+	return loadBalancerARNPattern(gatewayPattern(lbName))
+}
+
+func networkLoadBalancerARNPattern(lbName string) string {
+	return loadBalancerARNPattern(networkPattern(lbName))
+}
+
+func loadBalancerARNPattern(s string) string {
+	return `loadbalancer/` + s
+}
+
+func generalLoadBalancerPattern(lbName string) string {
+	return fmt.Sprintf(`%s/[a-z0-9]{16}`, lbName)
+}
+
+func applicationPattern(lbName string) string {
+	return `app/` + generalLoadBalancerPattern(lbName)
+}
+
+func gatewayPattern(lbName string) string {
+	return `gwy/` + generalLoadBalancerPattern(lbName)
+}
+
+func networkPattern(lbName string) string {
+	return `net/` + generalLoadBalancerPattern(lbName)
+}
+
+func testAccLoadBalancerConfig_baseInternal(rName string, subnetCount int) string {
+	return acctest.ConfigCompose(
+		acctest.ConfigVPCWithSubnets(rName, subnetCount),
+		fmt.Sprintf(`
+resource "aws_security_group" "test" {
+  name   = %[1]q
+  vpc_id = aws_vpc.test.id
+
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_baseIPAMPools(rName string) string {
+	return fmt.Sprintf(`
+data "aws_region" "current" {}
+
+resource "aws_vpc_ipam" "test" {
+  operating_regions {
+    region_name = data.aws_region.current.region
+  }
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_vpc_ipam_pool" "test_pool" {
+  address_family   = "ipv4"
+  ipam_scope_id    = aws_vpc_ipam.test.public_default_scope_id
+  locale           = data.aws_region.current.region
+  public_ip_source = "amazon"
+  description      = "Test Amazon CIDR Pool"
+  aws_service      = "ec2"
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_vpc_ipam_pool_cidr" "test_cidr" {
+  ipam_pool_id   = aws_vpc_ipam_pool.test_pool.id
+  netmask_length = 30
+}
+`, rName)
+}
+
+func testAccLoadBalancerConfig_albBasic(rName string) string {
+	return testAccLoadBalancerConfig_albSubnetCount(rName, 2, 2)
+}
+
+func testAccLoadBalancerConfig_albSubnetCount(rName string, nSubnets, nSubnetsReferenced int) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, nSubnets), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name            = %[1]q
+  internal        = true
+  security_groups = [aws_security_group.test.id]
+  subnets         = slice(aws_subnet.test[*].id, 0, %[2]d)
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+}
+`, rName, nSubnetsReferenced))
+}
+
+func testAccLoadBalancerConfig_albSubnetMappingCount(rName string, subnetCount int) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, subnetCount), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name            = %[1]q
+  internal        = true
+  security_groups = [aws_security_group.test.id]
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  dynamic "subnet_mapping" {
+    for_each = aws_subnet.test[*]
+    content {
+      subnet_id = subnet_mapping.value.id
+    }
+  }
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_albNameGenerated(rName string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  internal        = true
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_albZeroValueName(rName string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name            = ""
+  internal        = true
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+# See https://github.com/hashicorp/terraform-provider-aws/issues/2498
+output "lb_name" {
+  value = aws_lb.test.name
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_albNamePrefix(rName, namePrefix string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name_prefix     = %[2]q
+  internal        = true
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName, namePrefix))
+}
+
+func testAccLoadBalancerConfig_albDuplicateName(rName string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_albBasic(rName), fmt.Sprintf(`
+resource "aws_lb" "test2" {
+  name            = %[1]q
+  internal        = true
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_albIPAMPoolsBasic(rName string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), testAccLoadBalancerConfig_baseIPAMPools(rName), fmt.Sprintf(`
+resource "aws_internet_gateway" "test" {
+  vpc_id = aws_vpc.test.id
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_lb" "test" {
+  name            = %[1]q
+  ip_address_type = "ipv4"
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  ipam_pools {
+    ipv4_ipam_pool_id = aws_vpc_ipam_pool.test_pool.id
+  }
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  depends_on = [aws_vpc_ipam_pool_cidr.test_cidr, aws_internet_gateway.test]
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_albIPAMPoolsBasicDestroyALB(rName string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), testAccLoadBalancerConfig_baseIPAMPools(rName), fmt.Sprintf(`
+resource "aws_internet_gateway" "test" {
+  vpc_id = aws_vpc.test.id
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_albIPAMPoolsModify(rName string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), testAccLoadBalancerConfig_baseIPAMPools(rName), fmt.Sprintf(`
+resource "aws_vpc_ipam_pool" "test_pool2" {
+  address_family   = "ipv4"
+  ipam_scope_id    = aws_vpc_ipam.test.public_default_scope_id
+  locale           = data.aws_region.current.region
+  public_ip_source = "amazon"
+  description      = "Test Amazon CIDR Pool 2"
+  aws_service      = "ec2"
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_vpc_ipam_pool_cidr" "test_cidr2" {
+  ipam_pool_id   = aws_vpc_ipam_pool.test_pool2.id
+  netmask_length = 30
+}
+
+resource "aws_internet_gateway" "test" {
+  vpc_id = aws_vpc.test.id
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_lb" "test" {
+  name            = %[1]q
+  ip_address_type = "ipv4"
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  ipam_pools {
+    ipv4_ipam_pool_id = aws_vpc_ipam_pool.test_pool2.id
+  }
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  depends_on = [aws_vpc_ipam_pool_cidr.test_cidr2, aws_internet_gateway.test]
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_albIPAMPoolsModifyDestroyALB(rName string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), testAccLoadBalancerConfig_baseIPAMPools(rName), fmt.Sprintf(`
+resource "aws_vpc_ipam_pool" "test_pool2" {
+  address_family   = "ipv4"
+  ipam_scope_id    = aws_vpc_ipam.test.public_default_scope_id
+  locale           = data.aws_region.current.region
+  public_ip_source = "amazon"
+  description      = "Test Amazon CIDR Pool 2"
+  aws_service      = "ec2"
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_vpc_ipam_pool_cidr" "test_cidr2" {
+  ipam_pool_id   = aws_vpc_ipam_pool.test_pool2.id
+  netmask_length = 30
+}
+
+resource "aws_internet_gateway" "test" {
+  vpc_id = aws_vpc.test.id
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_albIPAMPoolsUnassign(rName string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), testAccLoadBalancerConfig_baseIPAMPools(rName), fmt.Sprintf(`
+resource "aws_internet_gateway" "test" {
+  vpc_id = aws_vpc.test.id
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_lb" "test" {
+  name            = %[1]q
+  ip_address_type = "ipv4"
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  depends_on = [aws_vpc_ipam_pool_cidr.test_cidr, aws_internet_gateway.test]
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_albIPAMPoolsUnassignDestroyALB(rName string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), testAccLoadBalancerConfig_baseIPAMPools(rName), fmt.Sprintf(`
+resource "aws_internet_gateway" "test" {
+  vpc_id = aws_vpc.test.id
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_albIPAddressType(rName, ipAddressType string) string {
+	return acctest.ConfigCompose(acctest.ConfigVPCWithSubnetsIPv6(rName, 2), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name            = %[1]q
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  ip_address_type = %[2]q
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  tags = {
+    Name = %[1]q
+  }
+
+  depends_on = [aws_egress_only_internet_gateway.test, aws_internet_gateway.test]
+}
+
+resource "aws_security_group" "test" {
+  name   = %[1]q
+  vpc_id = aws_vpc.test.id
+
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_egress_only_internet_gateway" "test" {
+  vpc_id = aws_vpc.test.id
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_internet_gateway" "test" {
+  vpc_id = aws_vpc.test.id
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName, ipAddressType))
+}
+
+func testAccLoadBalancerConfig_albOutpost(rName string) string {
+	return acctest.ConfigCompose(
+		acctest.ConfigAvailableAZsNoOptIn(),
+		fmt.Sprintf(`
+data "aws_outposts_outposts" "test" {}
+
+data "aws_outposts_outpost" "test" {
+  id = tolist(data.aws_outposts_outposts.test.ids)[0]
+}
+
+data "aws_ec2_coip_pools" "test" {}
+
+data "aws_ec2_local_gateway_route_table" "test" {
+  outpost_arn = tolist(data.aws_outposts_outposts.test.arns)[0]
+}
+
+resource "aws_ec2_local_gateway_route_table_vpc_association" "test" {
+  local_gateway_route_table_id = data.aws_ec2_local_gateway_route_table.test.id
+  vpc_id                       = aws_vpc.test.id
+}
+
+resource "aws_route_table" "test" {
+  vpc_id     = aws_vpc.test.id
+  depends_on = [aws_ec2_local_gateway_route_table_vpc_association.test]
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_route_table_association" "a" {
+  subnet_id      = aws_subnet.test.id
+  route_table_id = aws_route_table.test.id
+}
+
+resource "aws_lb" "test" {
+  name                       = %[1]q
+  security_groups            = [aws_security_group.test.id]
+  customer_owned_ipv4_pool   = tolist(data.aws_ec2_coip_pools.test.pool_ids)[0]
+  idle_timeout               = 30
+  enable_deletion_protection = false
+  subnets                    = [aws_subnet.test.id]
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_vpc" "test" {
+  cidr_block = "10.0.0.0/16"
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_subnet" "test" {
+  vpc_id            = aws_vpc.test.id
+  cidr_block        = "10.0.0.0/24"
+  availability_zone = data.aws_outposts_outpost.test.availability_zone
+  outpost_arn       = data.aws_outposts_outpost.test.arn
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_security_group" "test" {
+  name        = %[1]q
+  description = "Used for ALB Testing"
+  vpc_id      = aws_vpc.test.id
+
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_albEnableHTTP2(rName string, http2 bool) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name            = %[1]q
+  internal        = true
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  enable_http2 = %[2]t
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName, http2))
+}
+
+func testAccLoadBalancerConfig_albClientKeepAlive(rName string, value int64) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name            = %[1]q
+  internal        = true
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  enable_http2      = true
+  client_keep_alive = %[2]d
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName, value))
+}
+
+func testAccLoadBalancerConfig_albEnableDropInvalidHeaderFields(rName string, dropInvalid bool) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name            = %[1]q
+  internal        = true
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  drop_invalid_header_fields = %[2]t
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName, dropInvalid))
+}
+
+func testAccLoadBalancerConfig_albEnablePreserveHostHeader(rName string, enablePreserveHostHeader bool) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name            = %[1]q
+  internal        = true
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  preserve_host_header = %[2]t
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName, enablePreserveHostHeader))
+}
+
+func testAccLoadBalancerConfig_albEnableDeletionProtection(rName string, deletionProtection bool) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name            = %[1]q
+  internal        = true
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  idle_timeout               = 30
+  enable_deletion_protection = %[2]t
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName, deletionProtection))
+}
+
+func testAccLoadBalancerConfig_albEnableWAFFailOpen(rName string, wafFailOpen bool) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name            = %[1]q
+  internal        = true
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  enable_waf_fail_open = %[2]t
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName, wafFailOpen))
+}
+
+func testAccLoadBalancerConfig_nlbBasic(rName string) string {
+	return testAccLoadBalancerConfig_nlbSubnetMappingCount(rName, false, false, 1)
+}
+
+func testAccLoadBalancerConfig_nlbCrossZone(rName string, cz bool) string {
+	return testAccLoadBalancerConfig_nlbSubnetMappingCount(rName, cz, false, 1)
+}
+
+func testAccLoadBalancerConfig_nlbZonalShift(rName string, zs bool) string {
+	return testAccLoadBalancerConfig_nlbSubnetMappingCount(rName, true, zs, 1)
+}
+
+func testAccLoadBalancerConfig_nlbSecondaryIPAddresses(rName string, subnetCount, addressCount int) string {
+	return acctest.ConfigCompose(acctest.ConfigVPCWithSubnets(rName, subnetCount), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name               = %[1]q
+  internal           = true
+  load_balancer_type = "network"
+
+  enable_deletion_protection             = false
+  secondary_ips_auto_assigned_per_subnet = %[2]d
+
+  dynamic "subnet_mapping" {
+    for_each = aws_subnet.test[*]
+    content {
+      subnet_id = subnet_mapping.value.id
+    }
+  }
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName, addressCount))
+}
+
+func testAccLoadBalancerConfig_nlbSubnetMappingCount(rName string, cz, zs bool, subnetCount int) string {
+	return acctest.ConfigCompose(acctest.ConfigVPCWithSubnets(rName, subnetCount), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name               = %[1]q
+  internal           = true
+  load_balancer_type = "network"
+
+  enable_deletion_protection       = false
+  enable_cross_zone_load_balancing = %[2]t
+  enable_zonal_shift               = %[3]t
+
+  dynamic "subnet_mapping" {
+    for_each = aws_subnet.test[*]
+    content {
+      subnet_id = subnet_mapping.value.id
+    }
+  }
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName, cz, zs))
+}
+
+func testAccLoadBalancerConfig_gwlbBasic(rName string) string {
+	return acctest.ConfigCompose(acctest.ConfigVPCWithSubnets(rName, 1), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  load_balancer_type = "gateway"
+  name               = %[1]q
+
+  subnet_mapping {
+    subnet_id = aws_subnet.test[0].id
+  }
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_albIPv6(rName string) string {
+	return acctest.ConfigCompose(acctest.ConfigVPCWithSubnetsIPv6(rName, 1), fmt.Sprintf(`
+resource "aws_internet_gateway" "test" {
+  vpc_id = aws_vpc.test.id
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_lb" "test" {
+  name                       = %[1]q
+  load_balancer_type         = "network"
+  enable_deletion_protection = false
+
+  subnet_mapping {
+    subnet_id    = aws_subnet.test[0].id
+    ipv6_address = cidrhost(cidrsubnet(aws_vpc.test.ipv6_cidr_block, 8, 0), 5)
+  }
+
+  tags = {
+    Name = %[1]q
+  }
+
+  depends_on = [aws_internet_gateway.test]
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_gwlbEnableCrossZoneBalancing(rName string, enableCrossZoneLoadBalancing bool) string {
+	return acctest.ConfigCompose(acctest.ConfigVPCWithSubnets(rName, 1), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  enable_cross_zone_load_balancing = %[2]t
+  load_balancer_type               = "gateway"
+  name                             = %[1]q
+
+  subnet_mapping {
+    subnet_id = aws_subnet.test[0].id
+  }
+}
+`, rName, enableCrossZoneLoadBalancing))
+}
+
+func testAccLoadBalancerConfig_nlbAllocationID(rName string) string {
+	return acctest.ConfigCompose(acctest.ConfigVPCWithSubnets(rName, 2), fmt.Sprintf(`
+resource "aws_internet_gateway" "test" {
+  vpc_id = aws_vpc.test.id
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_route_table" "test" {
+  vpc_id = aws_vpc.test.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.test.id
+  }
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_route_table_association" "test" {
+  count          = 2
+  subnet_id      = aws_subnet.test[count.index].id
+  route_table_id = aws_route_table.test.id
+}
+
+resource "aws_lb" "test" {
+  name               = %[1]q
+  load_balancer_type = "network"
+
+  subnet_mapping {
+    subnet_id     = aws_subnet.test[0].id
+    allocation_id = aws_eip.test[0].id
+  }
+
+  subnet_mapping {
+    subnet_id     = aws_subnet.test[1].id
+    allocation_id = aws_eip.test[1].id
+  }
+
+  depends_on = [aws_internet_gateway.test]
+}
+
+resource "aws_eip" "test" {
+  count = 2
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_baseNLBPrivateIPV4Address(rName string) string {
+	return acctest.ConfigCompose(acctest.ConfigAvailableAZsNoOptIn(), fmt.Sprintf(`
+resource "aws_vpc" "test" {
+  cidr_block = "10.10.0.0/16"
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_subnet" "test1" {
+  vpc_id                  = aws_vpc.test.id
+  cidr_block              = "10.10.0.0/21"
+  map_public_ip_on_launch = true
+  availability_zone       = data.aws_availability_zones.available.names[0]
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_subnet" "test2" {
+  vpc_id                  = aws_vpc.test.id
+  cidr_block              = "10.10.8.0/21"
+  map_public_ip_on_launch = true
+  availability_zone       = data.aws_availability_zones.available.names[1]
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_nlbPrivateIPV4Address(rName string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseNLBPrivateIPV4Address(rName), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name                       = %[1]q
+  internal                   = true
+  load_balancer_type         = "network"
+  enable_deletion_protection = false
+
+  subnet_mapping {
+    subnet_id            = aws_subnet.test2.id
+    private_ipv4_address = "10.10.8.15"
+  }
+
+  subnet_mapping {
+    subnet_id            = aws_subnet.test1.id
+    private_ipv4_address = "10.10.0.15"
+  }
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_nlbDNSRecordClientRoutingPolicyAffinity(rName string) string {
+	return acctest.ConfigCompose(acctest.ConfigVPCWithSubnets(rName, 1), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name                             = %[1]q
+  dns_record_client_routing_policy = "availability_zone_affinity"
+  internal                         = true
+  load_balancer_type               = "network"
+
+  subnet_mapping {
+    subnet_id = aws_subnet.test[0].id
+  }
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_nlbDNSRecordClientRoutingPolicyAnyAvailabilityZone(rName string) string {
+	return acctest.ConfigCompose(acctest.ConfigVPCWithSubnets(rName, 1), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name                             = %[1]q
+  dns_record_client_routing_policy = "any_availability_zone"
+  internal                         = true
+  load_balancer_type               = "network"
+
+  subnet_mapping {
+    subnet_id = aws_subnet.test[0].id
+  }
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_nlbDNSRecordClientRoutingPolicyPartialAffinity(rName string) string {
+	return acctest.ConfigCompose(acctest.ConfigVPCWithSubnets(rName, 1), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name                             = %[1]q
+  dns_record_client_routing_policy = "partial_availability_zone_affinity"
+  internal                         = true
+  load_balancer_type               = "network"
+
+  subnet_mapping {
+    subnet_id = aws_subnet.test[0].id
+  }
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_albBackwardsCompatibility(rName string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), fmt.Sprintf(`
+resource "aws_alb" "test" {
+  name            = %[1]q
+  internal        = true
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_albUpdateSecurityGroups(rName string, n int) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 3), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name            = %[1]q
+  internal        = true
+  security_groups = slice([aws_security_group.test.id, aws_security_group.test2.id], 0, %[2]d)
+  subnets         = aws_subnet.test[*].id
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+}
+
+resource "aws_security_group" "test2" {
+  name   = "%[1]s-2"
+  vpc_id = aws_vpc.test.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "TCP"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName, n))
+}
+
+func testAccLoadBalancerConfig_albNoSecurityGroups(rName string) string {
+	return acctest.ConfigCompose(acctest.ConfigVPCWithSubnets(rName, 2), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name     = %[1]q
+  internal = true
+  subnets  = aws_subnet.test[*].id
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_baseALBAccessLogs(rName string) string {
+	return acctest.ConfigCompose(acctest.ConfigVPCWithSubnets(rName, 2), fmt.Sprintf(`
+data "aws_elb_service_account" "current" {}
+
+resource "aws_s3_bucket" "test" {
+  bucket        = %[1]q
+  force_destroy = true
+}
+
+data "aws_iam_policy_document" "test" {
+  statement {
+    actions   = ["s3:PutObject"]
+    effect    = "Allow"
+    resources = ["${aws_s3_bucket.test.arn}/*"]
+
+    principals {
+      type        = "AWS"
+      identifiers = [data.aws_elb_service_account.current.arn]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "test" {
+  bucket = aws_s3_bucket.test.bucket
+  policy = data.aws_iam_policy_document.test.json
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_albAccessLogs(enabled bool, rName, bucketPrefix string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseALBAccessLogs(rName), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  internal = true
+  name     = %[1]q
+  subnets  = aws_subnet.test[*].id
+
+  access_logs {
+    bucket  = aws_s3_bucket_policy.test.bucket
+    enabled = %[2]t
+    prefix  = %[3]q
+  }
+}
+`, rName, enabled, bucketPrefix))
+}
+
+func testAccLoadBalancerConfig_albAccessLogsNoBlocks(rName string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseALBAccessLogs(rName), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  internal = true
+  name     = %[1]q
+  subnets  = aws_subnet.test[*].id
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_albConnectionLogs(enabled bool, rName, bucketPrefix string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseALBAccessLogs(rName), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  internal = true
+  name     = %[1]q
+  subnets  = aws_subnet.test[*].id
+
+  connection_logs {
+    bucket  = aws_s3_bucket_policy.test.bucket
+    enabled = %[2]t
+    prefix  = %[3]q
+  }
+}
+`, rName, enabled, bucketPrefix))
+}
+
+func testAccLoadBalancerConfig_albConnectionLogsNoBlocks(rName string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseALBAccessLogs(rName), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  internal = true
+  name     = %[1]q
+  subnets  = aws_subnet.test[*].id
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_albHealthCheckLogs(enabled bool, rName, bucketPrefix string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseALBAccessLogs(rName), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  internal = true
+  name     = %[1]q
+  subnets  = aws_subnet.test[*].id
+
+  health_check_logs {
+    bucket  = aws_s3_bucket_policy.test.bucket
+    enabled = %[2]t
+    prefix  = %[3]q
+  }
+}
+`, rName, enabled, bucketPrefix))
+}
+
+func testAccLoadBalancerConfig_albHealthCheckLogsNoBlocks(rName string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseALBAccessLogs(rName), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  internal = true
+  name     = %[1]q
+  subnets  = aws_subnet.test[*].id
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_baseNLBAccessLogs(rName string) string {
+	return acctest.ConfigCompose(acctest.ConfigVPCWithSubnets(rName, 2), fmt.Sprintf(`
+resource "aws_s3_bucket" "test" {
+  bucket        = %[1]q
+  force_destroy = true
+}
+
+data "aws_iam_policy_document" "test" {
+  statement {
+    actions   = ["s3:PutObject"]
+    effect    = "Allow"
+    resources = ["${aws_s3_bucket.test.arn}/*"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["delivery.logs.amazonaws.com"]
+    }
+  }
+
+  statement {
+    actions   = ["s3:GetBucketAcl"]
+    effect    = "Allow"
+    resources = [aws_s3_bucket.test.arn]
+
+    principals {
+      type        = "Service"
+      identifiers = ["delivery.logs.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "test" {
+  bucket = aws_s3_bucket.test.bucket
+  policy = data.aws_iam_policy_document.test.json
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_nlbAccessLogs(enabled bool, rName, bucketPrefix string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseNLBAccessLogs(rName), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  internal           = true
+  load_balancer_type = "network"
+  name               = %[1]q
+  subnets            = aws_subnet.test[*].id
+
+  access_logs {
+    bucket  = aws_s3_bucket_policy.test.bucket
+    enabled = %[2]t
+    prefix  = %[3]q
+  }
+}
+`, rName, enabled, bucketPrefix))
+}
+
+func testAccLoadBalancerConfig_nlbAccessLogsNoBlocks(rName string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseNLBAccessLogs(rName), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  internal           = true
+  load_balancer_type = "network"
+  name               = %[1]q
+  subnets            = aws_subnet.test[*].id
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_nlbSecurityGroups(rName string, n int) string {
+	return acctest.ConfigCompose(acctest.ConfigVPCWithSubnets(rName, 2), fmt.Sprintf(`
+resource "aws_security_group" "test" {
+  count = 3
+
+  name   = "%[1]s-${count.index}"
+  vpc_id = aws_vpc.test.id
+
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_lb" "test" {
+  internal           = true
+  load_balancer_type = "network"
+  name               = %[1]q
+  subnets            = aws_subnet.test[*].id
+  security_groups    = slice(aws_security_group.test[*].id, 0, %[2]d)
+}
+`, rName, n))
+}
+
+func testAccLoadBalancerConfig_nlbNoSecurityGroups(rName string) string {
+	return acctest.ConfigCompose(acctest.ConfigVPCWithSubnets(rName, 2), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  internal           = true
+  load_balancer_type = "network"
+  name               = %[1]q
+  subnets            = aws_subnet.test[*].id
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_nlbSecurityGroupsEnforcePrivateLink(rName string, n int, enforcePrivateLink string) string {
+	return acctest.ConfigCompose(acctest.ConfigVPCWithSubnets(rName, 2), fmt.Sprintf(`
+resource "aws_security_group" "test" {
+  count = 3
+
+  name   = "%[1]s-${count.index}"
+  vpc_id = aws_vpc.test.id
+
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_lb" "test" {
+  internal           = true
+  load_balancer_type = "network"
+  name               = %[1]q
+  subnets            = aws_subnet.test[*].id
+  security_groups    = slice(aws_security_group.test[*].id, 0, %[2]d)
+
+  enforce_security_group_inbound_rules_on_private_link_traffic = %[3]q
+}
+`, rName, n, enforcePrivateLink))
+}
+
+// testAccLoadBalancerConfig_nlbSecurityGroupsUnknown returns a config where
+// the security group is created in the same config as the NLB, so its ID is
+// unknown at plan time.
+func testAccLoadBalancerConfig_nlbSecurityGroupsUnknown(rName string) string {
+	return acctest.ConfigCompose(acctest.ConfigVPCWithSubnets(rName, 2), fmt.Sprintf(`
+resource "aws_security_group" "test" {
+  name   = %[1]q
+  vpc_id = aws_vpc.test.id
+
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["10.0.0.0/8"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["10.0.0.0/8"]
+  }
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_lb" "test" {
+  internal           = true
+  load_balancer_type = "network"
+  name               = %[1]q
+  subnets            = aws_subnet.test[*].id
+  security_groups    = [aws_security_group.test.id]
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_nlbSubnetCount(rName string, subnetCount int) string {
+	return acctest.ConfigCompose(acctest.ConfigVPCWithSubnets(rName, subnetCount), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name = %[1]q
+
+  subnets = aws_subnet.test[*].id
+
+  load_balancer_type               = "network"
+  internal                         = true
+  idle_timeout                     = 60
+  enable_deletion_protection       = false
+  enable_cross_zone_load_balancing = false
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_albDesyncMitigationMode(rName, mode string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name            = %[1]q
+  internal        = true
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  desync_mitigation_mode = %[2]q
+}
+`, rName, mode))
+}
+
+func testAccLoadBalancerConfig_albTLSCipherSuiteEnabled(rName string, enabled bool) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name            = %[1]q
+  internal        = true
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  enable_tls_version_and_cipher_suite_headers = %[2]t
+}
+`, rName, enabled))
+}
+
+func testAccLoadBalancerConfig_albXFFHeaderProcessingMode(rName, mode string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name            = %[1]q
+  internal        = true
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  xff_header_processing_mode = %[2]q
+}
+`, rName, mode))
+}
+
+func testAccLoadBalancerConfig_albXFFClientPort(rName string, enabled bool) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name            = %[1]q
+  internal        = true
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  enable_xff_client_port = %[2]t
+}
+`, rName, enabled))
+}
+
+func testAccLoadBalancerConfig_albZonalShift(rName string, zs bool) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name            = %[1]q
+  internal        = true
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  enable_zonal_shift = %[2]t
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName, zs))
+}
+
+func testAccLoadBalancerConfig_albCapacityReservation(rName string, unit int) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseInternal(rName, 2), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name            = %[1]q
+  internal        = true
+  security_groups = [aws_security_group.test.id]
+  subnets         = slice(aws_subnet.test[*].id, 0, 2)
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  minimum_load_balancer_capacity {
+    capacity_units = %[2]d
+  }
+}
+`, rName, unit))
+}
+
+func testAccLoadBalancerConfig_albMoreThan20Attributes(rName string) string {
+	return acctest.ConfigCompose(testAccLoadBalancerConfig_baseALBAccessLogs(rName), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  desync_mitigation_mode                      = "monitor"
+  drop_invalid_header_fields                  = true
+  enable_http2                                = true
+  enable_tls_version_and_cipher_suite_headers = true
+  enable_waf_fail_open                        = true
+  enable_xff_client_port                      = true
+  internal                                    = true
+  ip_address_type                             = "ipv4"
+  load_balancer_type                          = "application"
+  name                                        = %[1]q
+  preserve_host_header                        = true
+  subnets                                     = aws_subnet.test[*].id
+  xff_header_processing_mode                  = "append"
+
+  access_logs {
+    bucket  = aws_s3_bucket_policy.test.bucket
+    enabled = true
+    prefix  = "%[1]s/access-logs"
+  }
+
+  connection_logs {
+    bucket  = aws_s3_bucket_policy.test.bucket
+    enabled = true
+    prefix  = "%[1]s/connection-logs"
+  }
+
+  health_check_logs {
+    bucket  = aws_s3_bucket_policy.test.bucket
+    enabled = true
+    prefix  = "%[1]s/health-check-logs"
+  }
+}
+`, rName))
+}
+
+func testAccLoadBalancerConfig_nlbEnablePrefixForIPv6SourceNAT(rName string, enablePrefix awstypes.EnablePrefixForIpv6SourceNatEnum) string {
+	return acctest.ConfigCompose(acctest.ConfigVPCWithSubnetsIPv6(rName, 2), fmt.Sprintf(`
+resource "aws_lb" "test" {
+  name            = %[1]q
+  security_groups = [aws_security_group.test.id]
+  subnets         = aws_subnet.test[*].id
+
+  ip_address_type                   = "dualstack"
+  load_balancer_type                = "network"
+  enable_prefix_for_ipv6_source_nat = %[2]q
+
+  idle_timeout               = 30
+  enable_deletion_protection = false
+
+  tags = {
+    Name = %[1]q
+  }
+
+  depends_on = [aws_egress_only_internet_gateway.test, aws_internet_gateway.test]
+}
+
+resource "aws_security_group" "test" {
+  name   = %[1]q
+  vpc_id = aws_vpc.test.id
+
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_egress_only_internet_gateway" "test" {
+  vpc_id = aws_vpc.test.id
+
+  tags = {
+    Name = %[1]q
+  }
+}
+
+resource "aws_internet_gateway" "test" {
+  vpc_id = aws_vpc.test.id
+
+  tags = {
+    Name = %[1]q
+  }
+}
+`, rName, enablePrefix))
+}

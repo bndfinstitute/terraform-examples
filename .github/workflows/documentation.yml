@@ -1,0 +1,63 @@
+# Copyright IBM Corp. 2014, 2026
+# "SPDX-License-Identifier: MPL-2.0"
+
+name: Documentation Checks
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - .ci/.markdownlinkcheck.json
+      - .markdownlint.yml
+      - .github/workflows/documentation.yml
+      - docs/**
+      - go.mod
+
+## NOTE: !!!
+## When changing these workflows, ensure that the following is updated:
+##   - Documentation: docs/continuous-integration.md
+##   - Documentation: docs/makefile-cheat-sheet.md
+##   - Makefile: ./GNUmakefile
+
+permissions:
+  contents: read # required for checkout
+
+jobs:
+  markdown-link-check:
+    runs-on: ubuntu-latest
+    env:
+      UV_THREADPOOL_SIZE: 128
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: YakDriver/md-check-links@0a295ce2e08c544aae01cccc9b4c6801a8398942 # v2.2.0
+        with:
+          quiet: 'yes'
+          verbose: 'yes'
+          config: '.ci/.markdownlinkcheck.json'
+          directory: 'docs'
+          extension: '.md'
+          branch: "main"
+          modified: "yes"
+  markdown-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: avto-dev/markdown-lint@04d43ee9191307b50935a753da3b775ab695eceb # v1.5.0
+        with:
+          args: 'docs'
+  misspell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        timeout-minutes: 2
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-pkg-mod-${{ hashFiles('go.sum') }}
+      - run: cd .ci/tools && go install github.com/client9/misspell/cmd/misspell
+      - run: make docs-misspell

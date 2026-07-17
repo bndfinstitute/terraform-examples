@@ -1,0 +1,308 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+package iam
+
+import (
+	"encoding/json"
+	"fmt"
+	"slices"
+	"strconv"
+
+	"github.com/YakDriver/regexache"
+	"github.com/aws/aws-sdk-go-v2/aws/arn"
+	"github.com/jmespath/go-jmespath"
+)
+
+const (
+	policyModelMarshallJSONStartSliceSize = 2
+)
+
+type iamPolicyDoc struct {
+	Version    string                `json:",omitempty"`
+	Id         string                `json:",omitempty"`
+	Statements []*iamPolicyStatement `json:"Statement,omitempty"`
+}
+
+type iamPolicyStatement struct {
+	Sid           string                         `json:",omitempty"`
+	Effect        string                         `json:",omitempty"`
+	Actions       any                            `json:"Action,omitempty"`
+	NotActions    any                            `json:"NotAction,omitempty"`
+	Resources     any                            `json:"Resource,omitempty"`
+	NotResources  any                            `json:"NotResource,omitempty"`
+	Principals    iamPolicyStatementPrincipalSet `json:"Principal,omitempty"`
+	NotPrincipals iamPolicyStatementPrincipalSet `json:"NotPrincipal,omitempty"`
+	Conditions    iamPolicyStatementConditionSet `json:"Condition,omitempty"`
+}
+
+type iamPolicyStatementPrincipal struct {
+	Type        string
+	Identifiers any
+}
+
+type iamPolicyStatementPrincipalSet []iamPolicyStatementPrincipal
+
+type iamPolicyStatementCondition struct {
+	Test     string
+	Variable string
+	Values   any
+}
+
+type iamPolicyStatementConditionSet []iamPolicyStatementCondition
+
+func (s *iamPolicyDoc) Merge(newDoc *iamPolicyDoc) {
+	// adopt newDoc's Id
+	if len(newDoc.Id) > 0 {
+		s.Id = newDoc.Id
+	}
+
+	// let newDoc upgrade our Version
+	if newDoc.Version > s.Version {
+		s.Version = newDoc.Version
+	}
+
+	// merge in newDoc's statements, overwriting any existing Sids
+	var seen bool
+	for _, newStatement := range newDoc.Statements {
+		if len(newStatement.Sid) == 0 {
+			s.Statements = append(s.Statements, newStatement)
+			continue
+		}
+		seen = false
+		for i, existingStatement := range s.Statements {
+			if existingStatement.Sid == newStatement.Sid {
+				s.Statements[i] = newStatement
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			s.Statements = append(s.Statements, newStatement)
+		}
+	}
+}
+
+func (ps iamPolicyStatementPrincipalSet) MarshalJSON() ([]byte, error) {
+	raw := map[string]any{}
+
+	// Although IAM documentation says that "*" and {"AWS": "*"} are equivalent
+	// (https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_principal.html),
+	// in practice they are not for IAM roles. IAM will return an error if trust
+	// policy have "*" or {"*": "*"} as principal, but will accept {"AWS": "*"}.
+	// Only {"*": "*"} should be normalized to "*".
+	if len(ps) == 1 {
+		p := ps[0]
+		if p.Type == "*" {
+			if sv, ok := p.Identifiers.(string); ok && sv == "*" {
+				return []byte(`"*"`), nil
+			}
+
+			if av, ok := p.Identifiers.([]string); ok && len(av) == 1 && av[0] == "*" {
+				return []byte(`"*"`), nil
+			}
+		}
+	}
+
+	for _, p := range ps {
+		switch i := p.Identifiers.(type) {
+		case []string:
+			switch v := raw[p.Type].(type) {
+			case nil:
+				raw[p.Type] = make([]string, 0, len(i))
+			case string:
+				// Convert to []string to prevent panic
+				raw[p.Type] = make([]string, 0, len(i)+1)
+				raw[p.Type] = append(raw[p.Type].([]string), v)
+			}
+			slices.Sort(i)
+			slices.Reverse(i)
+			raw[p.Type] = append(raw[p.Type].([]string), i...)
+		case string:
+			switch v := raw[p.Type].(type) {
+			case nil:
+				raw[p.Type] = i
+			case string:
+				// Convert to []string to stop drop of principals
+				raw[p.Type] = make([]string, 0, policyModelMarshallJSONStartSliceSize)
+				raw[p.Type] = append(raw[p.Type].([]string), v)
+				raw[p.Type] = append(raw[p.Type].([]string), i)
+			case []string:
+				raw[p.Type] = append(raw[p.Type].([]string), i)
+			}
+		default:
+			return []byte{}, fmt.Errorf("Unsupported data type %T for IAMPolicyStatementPrincipalSet", i)
+		}
+	}
+
+	return json.Marshal(&raw)
+}
+
+func (ps *iamPolicyStatementPrincipalSet) UnmarshalJSON(b []byte) error {
+	var out iamPolicyStatementPrincipalSet
+
+	var data any
+	if err := json.Unmarshal(b, &data); err != nil {
+		return err
+	}
+
+	switch t := data.(type) {
+	case string:
+		out = append(out, iamPolicyStatementPrincipal{Type: "*", Identifiers: []string{"*"}})
+	case map[string]any:
+		for key, value := range data.(map[string]any) {
+			switch vt := value.(type) {
+			case string:
+				out = append(out, iamPolicyStatementPrincipal{Type: key, Identifiers: value.(string)})
+			case []any:
+				values := []string{}
+				for i, v := range value.([]any) {
+					s, ok := v.(string)
+					if !ok {
+						return fmt.Errorf("Unsupported element type %T for IAMPolicyStatementPrincipalSet.Identifiers[%d] (principal type %q): must be string", v, i, key)
+					}
+					values = append(values, s)
+				}
+				slices.Sort(values)
+				out = append(out, iamPolicyStatementPrincipal{Type: key, Identifiers: values})
+			default:
+				return fmt.Errorf("Unsupported data type %T for IAMPolicyStatementPrincipalSet.Identifiers", vt)
+			}
+		}
+	default:
+		return fmt.Errorf("Unsupported data type %T for IAMPolicyStatementPrincipalSet", t)
+	}
+
+	*ps = out
+	return nil
+}
+
+func (cs iamPolicyStatementConditionSet) MarshalJSON() ([]byte, error) {
+	raw := map[string]map[string]any{}
+
+	for _, c := range cs {
+		if _, ok := raw[c.Test]; !ok {
+			raw[c.Test] = map[string]any{}
+		}
+		if _, ok := raw[c.Test][c.Variable]; !ok {
+			raw[c.Test][c.Variable] = []string{}
+		}
+		switch i := c.Values.(type) {
+		case []string:
+			// order matters with values so not sorting here
+			raw[c.Test][c.Variable] = append(raw[c.Test][c.Variable].([]string), i...)
+		case string:
+			raw[c.Test][c.Variable] = append(raw[c.Test][c.Variable].([]string), i)
+		default:
+			return nil, fmt.Errorf("Unsupported data type for IAMPolicyStatementConditionSet: %s", i)
+		}
+	}
+
+	// flatten entries with a single item to match AWS IAM syntax
+	for k1 := range raw {
+		for k2 := range raw[k1] {
+			items := raw[k1][k2].([]string)
+			if len(items) == 1 {
+				raw[k1][k2] = items[0]
+			}
+		}
+	}
+
+	return json.Marshal(&raw)
+}
+
+func (cs *iamPolicyStatementConditionSet) UnmarshalJSON(b []byte) error {
+	var out iamPolicyStatementConditionSet
+
+	var data map[string]map[string]any
+	if err := json.Unmarshal(b, &data); err != nil {
+		return err
+	}
+
+	for test_key, test_value := range data {
+		for var_key, var_values := range test_value {
+			switch var_values := var_values.(type) {
+			case string:
+				out = append(out, iamPolicyStatementCondition{Test: test_key, Variable: var_key, Values: []string{var_values}})
+			case bool:
+				out = append(out, iamPolicyStatementCondition{Test: test_key, Variable: var_key, Values: strconv.FormatBool(var_values)})
+			case []any:
+				values := []string{}
+				for _, v := range var_values {
+					values = append(values, v.(string))
+				}
+				out = append(out, iamPolicyStatementCondition{Test: test_key, Variable: var_key, Values: values})
+			}
+		}
+	}
+
+	*cs = out
+	return nil
+}
+
+func policyDecodeConfigStringList(lI []any) any {
+	if len(lI) == 1 {
+		return lI[0].(string)
+	}
+	ret := make([]string, len(lI))
+	for i, vI := range lI {
+		ret[i] = vI.(string)
+	}
+	slices.Sort(ret)
+	slices.Reverse(ret)
+	return ret
+}
+
+// policyHasValidAWSPrincipals validates that the Principals in an IAM Policy are valid
+// Assumes that non-"AWS" Principals are valid
+// The value can be a single string or a slice of strings
+// Valid strings are either an ARN or an AWS account ID
+func policyHasValidAWSPrincipals(policy string) (bool, error) { // nosemgrep:ci.aws-in-func-name
+	var policyData any
+	err := json.Unmarshal([]byte(policy), &policyData)
+	if err != nil {
+		return false, fmt.Errorf("parsing policy: %w", err)
+	}
+
+	result, err := jmespath.Search("Statement[*].Principal.AWS", policyData)
+	if err != nil {
+		return false, fmt.Errorf("parsing policy: %w", err)
+	}
+
+	principals, ok := result.([]any)
+	if !ok {
+		return false, fmt.Errorf(`parsing policy: unexpected result: (%[1]T) "%[1]v"`, result)
+	}
+
+	for _, principal := range principals {
+		switch x := principal.(type) {
+		case string:
+			if !isValidPolicyAWSPrincipal(x) {
+				return false, nil
+			}
+		case []string:
+			for _, s := range x {
+				if !isValidPolicyAWSPrincipal(s) {
+					return false, nil
+				}
+			}
+		}
+	}
+
+	return true, nil
+}
+
+// isValidPolicyAWSPrincipal returns true if a string is a valid AWS Princial for an IAM Policy document
+// That is: either an ARN, an AWS account ID, or `*`
+func isValidPolicyAWSPrincipal(principal string) bool { // nosemgrep:ci.aws-in-func-name
+	if principal == "*" {
+		return true
+	}
+	if arn.IsARN(principal) {
+		return true
+	}
+	if regexache.MustCompile(`^\d{12}$`).MatchString(principal) {
+		return true
+	}
+	return false
+}

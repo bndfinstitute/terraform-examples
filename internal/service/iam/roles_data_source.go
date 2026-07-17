@@ -1,0 +1,100 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+// DONOTCOPY: Copying old resources spreads bad habits. Use skaff instead.
+
+package iam
+
+import (
+	"context"
+
+	"github.com/YakDriver/regexache"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/iam"
+	awstypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
+	"github.com/hashicorp/terraform-provider-aws/internal/conns"
+	"github.com/hashicorp/terraform-provider-aws/internal/errs/sdkdiag"
+	inttypes "github.com/hashicorp/terraform-provider-aws/internal/types"
+	"github.com/hashicorp/terraform-provider-aws/names"
+)
+
+// @SDKDataSource("aws_iam_roles", name="Roles")
+func dataSourceRoles() *schema.Resource {
+	return &schema.Resource{
+		ReadWithoutTimeout: dataSourceRolesRead,
+
+		SchemaFunc: func() map[string]*schema.Schema {
+			return map[string]*schema.Schema{
+				names.AttrARNs: {
+					Type:     schema.TypeSet,
+					Computed: true,
+					Elem:     &schema.Schema{Type: schema.TypeString},
+				},
+				"name_regex": {
+					Type:         schema.TypeString,
+					Optional:     true,
+					ValidateFunc: validation.StringIsValidRegExp,
+				},
+				names.AttrNames: {
+					Type:     schema.TypeSet,
+					Computed: true,
+					Elem:     &schema.Schema{Type: schema.TypeString},
+				},
+				"path_prefix": {
+					Type:     schema.TypeString,
+					Optional: true,
+				},
+			}
+		},
+	}
+}
+
+func dataSourceRolesRead(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
+	var diags diag.Diagnostics
+	conn := meta.(*conns.AWSClient).IAMClient(ctx)
+
+	input := &iam.ListRolesInput{}
+
+	if v, ok := d.GetOk("path_prefix"); ok {
+		input.PathPrefix = aws.String(v.(string))
+	}
+
+	var results []awstypes.Role
+
+	pages := iam.NewListRolesPaginator(conn, input)
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+		if err != nil {
+			return sdkdiag.AppendErrorf(diags, "reading IAM roles: %s", err)
+		}
+
+		for _, role := range page.Roles {
+			if p := &role; inttypes.IsZero(p) {
+				continue
+			}
+
+			if v, ok := d.GetOk("name_regex"); ok && !regexache.MustCompile(v.(string)).MatchString(aws.ToString(role.RoleName)) {
+				continue
+			}
+
+			results = append(results, role)
+		}
+	}
+
+	d.SetId(meta.(*conns.AWSClient).Region(ctx))
+
+	var arns, nms []string
+
+	for _, r := range results {
+		arns = append(arns, aws.ToString(r.Arn))
+		nms = append(nms, aws.ToString(r.RoleName))
+	}
+
+	d.Set(names.AttrARNs, arns)
+	d.Set(names.AttrNames, nms)
+
+	return diags
+}

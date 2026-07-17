@@ -1,0 +1,283 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+package apigateway_test
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/service/apigateway"
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-provider-aws/internal/acctest"
+	"github.com/hashicorp/terraform-provider-aws/internal/retry"
+	tfapigateway "github.com/hashicorp/terraform-provider-aws/internal/service/apigateway"
+	"github.com/hashicorp/terraform-provider-aws/names"
+)
+
+func TestAccAPIGatewayResource_basic(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf apigateway.GetResourceOutput
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_api_gateway_resource.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); acctest.PreCheckAPIGatewayTypeEDGE(t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.APIGatewayServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckResourceDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccResourceConfig_basic(rName, "test"),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckResourceExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, names.AttrPath, "/test"),
+					resource.TestCheckResourceAttr(resourceName, "path_part", "test"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateIdFunc: testAccResourceImportStateIdFunc(resourceName),
+				ImportStateVerify: true,
+			},
+		},
+	})
+}
+
+func TestAccAPIGatewayResource_update(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf apigateway.GetResourceOutput
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_api_gateway_resource.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); acctest.PreCheckAPIGatewayTypeEDGE(t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.APIGatewayServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckResourceDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccResourceConfig_basic(rName, "test"),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckResourceExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, names.AttrPath, "/test"),
+					resource.TestCheckResourceAttr(resourceName, "path_part", "test"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateIdFunc: testAccResourceImportStateIdFunc(resourceName),
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccResourceConfig_basic(rName, "test_changed"),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckResourceExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, names.AttrPath, "/test_changed"),
+					resource.TestCheckResourceAttr(resourceName, "path_part", "test_changed"),
+				),
+			},
+		},
+	})
+}
+
+// https://github.com/hashicorp/terraform-provider-aws/issues/42904
+func TestAccAPIGatewayResource_recomputePath(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf apigateway.GetResourceOutput
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_api_gateway_resource.test"
+	copyName := "aws_api_gateway_resource.copy"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); acctest.PreCheckAPIGatewayTypeEDGE(t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.APIGatewayServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckResourceDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccResourceConfig_copy(rName, "test"),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckResourceExists(ctx, t, resourceName, &conf),
+					testAccCheckResourceExists(ctx, t, copyName, &conf),
+					resource.TestCheckResourceAttr(resourceName, names.AttrPath, "/test"),
+					resource.TestCheckResourceAttr(resourceName, "path_part", "test"),
+					resource.TestCheckResourceAttr(copyName, names.AttrPath, "/test-copy"),
+					resource.TestCheckResourceAttr(copyName, "path_part", "test-copy"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateIdFunc: testAccResourceImportStateIdFunc(resourceName),
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccResourceConfig_copy(rName, "test_changed"),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckResourceExists(ctx, t, resourceName, &conf),
+					testAccCheckResourceExists(ctx, t, copyName, &conf),
+					resource.TestCheckResourceAttr(resourceName, names.AttrPath, "/test_changed"),
+					resource.TestCheckResourceAttr(resourceName, "path_part", "test_changed"),
+					resource.TestCheckResourceAttr(copyName, names.AttrPath, "/test_changed-copy"),
+					resource.TestCheckResourceAttr(copyName, "path_part", "test_changed-copy"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccAPIGatewayResource_disappears(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf apigateway.GetResourceOutput
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_api_gateway_resource.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); acctest.PreCheckAPIGatewayTypeEDGE(t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.APIGatewayServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckResourceDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccResourceConfig_basic(rName, "test"),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckResourceExists(ctx, t, resourceName, &conf),
+					acctest.CheckSDKResourceDisappears(ctx, t, tfapigateway.ResourceResource(), resourceName),
+				),
+				ExpectNonEmptyPlan: true,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+					PostApplyPostRefresh: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+		},
+	})
+}
+
+// https://github.com/hashicorp/terraform-provider-aws/issues/37007.
+func TestAccAPIGatewayResource_withSleep(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf apigateway.GetResourceOutput
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_api_gateway_resource.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); acctest.PreCheckAPIGatewayTypeEDGE(t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.APIGatewayServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckResourceDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccResourceConfig_base(rName),
+				Check: resource.ComposeTestCheckFunc(
+					acctest.CheckSleep(t, 10*time.Second),
+				),
+			},
+			{
+				Config: testAccResourceConfig_basic(rName, "test"),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckResourceExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, names.AttrPath, "/test"),
+					resource.TestCheckResourceAttr(resourceName, "path_part", "test"),
+				),
+			},
+		},
+	})
+}
+
+func testAccCheckResourceExists(ctx context.Context, t *testing.T, n string, v *apigateway.GetResourceOutput) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[n]
+		if !ok {
+			return fmt.Errorf("Not found: %s", n)
+		}
+
+		conn := acctest.ProviderMeta(ctx, t).APIGatewayClient(ctx)
+
+		output, err := tfapigateway.FindResourceByTwoPartKey(ctx, conn, rs.Primary.ID, rs.Primary.Attributes["rest_api_id"])
+
+		if err != nil {
+			return err
+		}
+
+		*v = *output
+
+		return nil
+	}
+}
+
+func testAccCheckResourceDestroy(ctx context.Context, t *testing.T) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		conn := acctest.ProviderMeta(ctx, t).APIGatewayClient(ctx)
+
+		for _, rs := range s.RootModule().Resources {
+			if rs.Type != "aws_api_gateway_resource" {
+				continue
+			}
+
+			_, err := tfapigateway.FindResourceByTwoPartKey(ctx, conn, rs.Primary.ID, rs.Primary.Attributes["rest_api_id"])
+
+			if retry.NotFound(err) {
+				continue
+			}
+
+			if err != nil {
+				return err
+			}
+
+			return fmt.Errorf("API Gateway Resource %s still exists", rs.Primary.ID)
+		}
+
+		return nil
+	}
+}
+
+func testAccResourceImportStateIdFunc(resourceName string) resource.ImportStateIdFunc {
+	return func(s *terraform.State) (string, error) {
+		rs, ok := s.RootModule().Resources[resourceName]
+		if !ok {
+			return "", fmt.Errorf("Not found: %s", resourceName)
+		}
+
+		return fmt.Sprintf("%s/%s", rs.Primary.Attributes["rest_api_id"], rs.Primary.ID), nil
+	}
+}
+
+func testAccResourceConfig_base(rName string) string {
+	return fmt.Sprintf(`
+resource "aws_api_gateway_rest_api" "test" {
+  name = %[1]q
+}
+`, rName)
+}
+
+func testAccResourceConfig_basic(rName string, pathPart string) string {
+	return acctest.ConfigCompose(testAccResourceConfig_base(rName), fmt.Sprintf(`
+resource "aws_api_gateway_resource" "test" {
+  rest_api_id = aws_api_gateway_rest_api.test.id
+  parent_id   = aws_api_gateway_rest_api.test.root_resource_id
+  path_part   = %[1]q
+}
+`, pathPart))
+}
+
+func testAccResourceConfig_copy(rName string, pathPart string) string {
+	return acctest.ConfigCompose(testAccResourceConfig_basic(rName, pathPart), `
+resource "aws_api_gateway_resource" "copy" {
+  rest_api_id = aws_api_gateway_rest_api.test.id
+  parent_id   = aws_api_gateway_rest_api.test.root_resource_id
+  path_part   = "${replace(aws_api_gateway_resource.test.path, "/", "")}-copy"
+}
+`)
+}

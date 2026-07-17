@@ -1,0 +1,50 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+package sqs
+
+import (
+	"testing"
+
+	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	"github.com/hashicorp/terraform-provider-aws/names"
+)
+
+func TestQueuePolicyMigrateState(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		StateVersion int
+		ID           string
+		Attributes   map[string]string
+		Expected     string
+		Meta         any
+	}{
+		"v0_1": {
+			StateVersion: 0,
+			ID:           "sqs-policy-https://queue.amazonaws.com/123456789012/myqueue",
+			Attributes: map[string]string{
+				names.AttrPolicy: "{}",
+				"queue_url":      "https://queue.amazonaws.com/123456789012/myqueue",
+			},
+			Expected: "https://queue.amazonaws.com/123456789012/myqueue",
+		},
+	}
+
+	for tn, tc := range cases {
+		is := &terraform.InstanceState{
+			ID:         tc.ID,
+			Attributes: tc.Attributes,
+		}
+		is, err := queuePolicyMigrateState(
+			tc.StateVersion, is, tc.Meta)
+
+		if err != nil {
+			t.Fatalf("bad: %s, err: %#v", tn, err)
+		}
+
+		if is.ID != tc.Expected {
+			t.Fatalf("bad sqs queue policy id: %s\n\n expected: %s", is.ID, tc.Expected)
+		}
+	}
+}

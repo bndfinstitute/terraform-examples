@@ -1,0 +1,250 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+package cloudfront_test
+
+import (
+	"context"
+	"fmt"
+	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/service/cloudfront"
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-provider-aws/internal/acctest"
+	"github.com/hashicorp/terraform-provider-aws/internal/retry"
+	tfcloudfront "github.com/hashicorp/terraform-provider-aws/internal/service/cloudfront"
+	"github.com/hashicorp/terraform-provider-aws/names"
+)
+
+func TestAccCloudFrontFieldLevelEncryptionConfig_basic(t *testing.T) {
+	ctx := acctest.Context(t)
+	var v cloudfront.GetFieldLevelEncryptionConfigOutput
+	resourceName := "aws_cloudfront_field_level_encryption_config.test"
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); acctest.PreCheckPartitionHasService(t, names.CloudFrontEndpointID) },
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		ErrorCheck:               acctest.ErrorCheck(t, names.CloudFrontServiceID),
+		CheckDestroy:             testAccCheckFieldLevelEncryptionConfigDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccFieldLevelEncryptionConfigConfig_basic(rName),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckFieldLevelEncryptionConfigExists(ctx, t, resourceName, &v),
+					acctest.CheckResourceAttrGlobalARNFormat(ctx, resourceName, names.AttrARN, "cloudfront", "field-level-encryption-config/{id}"),
+					resource.TestCheckResourceAttr(resourceName, names.AttrComment, "some comment"),
+					resource.TestCheckResourceAttr(resourceName, "content_type_profile_config.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "content_type_profile_config.0.content_type_profiles.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "content_type_profile_config.0.content_type_profiles.0.items.#", "1"),
+					resource.TestCheckTypeSetElemNestedAttrs(resourceName, "content_type_profile_config.0.content_type_profiles.0.items.*", map[string]string{
+						names.AttrContentType: "application/x-www-form-urlencoded",
+						names.AttrFormat:      "URLEncoded",
+					}),
+					resource.TestCheckResourceAttr(resourceName, "content_type_profile_config.0.forward_when_content_type_is_unknown", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "query_arg_profile_config.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "query_arg_profile_config.0.forward_when_query_arg_profile_is_unknown", acctest.CtTrue),
+					resource.TestCheckResourceAttr(resourceName, "query_arg_profile_config.0.query_arg_profiles.#", "0"),
+					resource.TestCheckResourceAttrSet(resourceName, "etag"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccFieldLevelEncryptionConfigConfig_updated(rName),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckFieldLevelEncryptionConfigExists(ctx, t, resourceName, &v),
+					resource.TestCheckResourceAttr(resourceName, names.AttrComment, "some other comment"),
+					resource.TestCheckResourceAttr(resourceName, "content_type_profile_config.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "content_type_profile_config.0.content_type_profiles.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "content_type_profile_config.0.content_type_profiles.0.items.#", "1"),
+					resource.TestCheckTypeSetElemNestedAttrs(resourceName, "content_type_profile_config.0.content_type_profiles.0.items.*", map[string]string{
+						names.AttrContentType: "application/x-www-form-urlencoded",
+						names.AttrFormat:      "URLEncoded",
+					}),
+					resource.TestCheckResourceAttr(resourceName, "query_arg_profile_config.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "query_arg_profile_config.0.forward_when_query_arg_profile_is_unknown", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "query_arg_profile_config.0.query_arg_profiles.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "query_arg_profile_config.0.query_arg_profiles.0.items.#", "2"),
+					resource.TestCheckTypeSetElemNestedAttrs(resourceName, "query_arg_profile_config.0.query_arg_profiles.0.items.*", map[string]string{
+						"query_arg": "Arg1",
+					}),
+					resource.TestCheckTypeSetElemNestedAttrs(resourceName, "query_arg_profile_config.0.query_arg_profiles.0.items.*", map[string]string{
+						"query_arg": "Arg2",
+					}),
+					resource.TestCheckResourceAttrSet(resourceName, "etag"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccCloudFrontFieldLevelEncryptionConfig_disappears(t *testing.T) {
+	ctx := acctest.Context(t)
+	var v cloudfront.GetFieldLevelEncryptionConfigOutput
+	resourceName := "aws_cloudfront_field_level_encryption_config.test"
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); acctest.PreCheckPartitionHasService(t, names.CloudFrontEndpointID) },
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		ErrorCheck:               acctest.ErrorCheck(t, names.CloudFrontServiceID),
+		CheckDestroy:             testAccCheckFieldLevelEncryptionConfigDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccFieldLevelEncryptionConfigConfig_basic(rName),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckFieldLevelEncryptionConfigExists(ctx, t, resourceName, &v),
+					acctest.CheckSDKResourceDisappears(ctx, t, tfcloudfront.ResourceFieldLevelEncryptionConfig(), resourceName),
+				),
+				ExpectNonEmptyPlan: true,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+					PostApplyPostRefresh: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func testAccCheckFieldLevelEncryptionConfigDestroy(ctx context.Context, t *testing.T) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		conn := acctest.ProviderMeta(ctx, t).CloudFrontClient(ctx)
+
+		for _, rs := range s.RootModule().Resources {
+			if rs.Type != "aws_cloudfront_field_level_encryption_config" {
+				continue
+			}
+
+			_, err := tfcloudfront.FindFieldLevelEncryptionConfigByID(ctx, conn, rs.Primary.ID)
+
+			if retry.NotFound(err) {
+				continue
+			}
+
+			if err != nil {
+				return err
+			}
+
+			return fmt.Errorf("CloudFront Field-level Encryption Config %s still exists", rs.Primary.ID)
+		}
+
+		return nil
+	}
+}
+
+func testAccCheckFieldLevelEncryptionConfigExists(ctx context.Context, t *testing.T, n string, v *cloudfront.GetFieldLevelEncryptionConfigOutput) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[n]
+		if !ok {
+			return fmt.Errorf("Not found: %s", n)
+		}
+
+		conn := acctest.ProviderMeta(ctx, t).CloudFrontClient(ctx)
+
+		output, err := tfcloudfront.FindFieldLevelEncryptionConfigByID(ctx, conn, rs.Primary.ID)
+
+		if err != nil {
+			return err
+		}
+
+		*v = *output
+
+		return nil
+	}
+}
+
+func testAccFieldLevelEncryptionConfig_base(rName string) string {
+	return fmt.Sprintf(`
+resource "aws_cloudfront_public_key" "test" {
+  comment     = "test key"
+  encoded_key = file("test-fixtures/cloudfront-public-key.pem")
+  name        = %[1]q
+}
+
+resource "aws_cloudfront_field_level_encryption_profile" "test" {
+  comment = "some comment"
+  name    = %[1]q
+
+  encryption_entities {
+    items {
+      public_key_id = aws_cloudfront_public_key.test.id
+      provider_id   = %[1]q
+
+      field_patterns {
+        items = ["DateOfBirth"]
+      }
+    }
+  }
+}
+`, rName)
+}
+
+func testAccFieldLevelEncryptionConfigConfig_basic(rName string) string {
+	return acctest.ConfigCompose(testAccFieldLevelEncryptionConfig_base(rName), `
+resource "aws_cloudfront_field_level_encryption_config" "test" {
+  comment = "some comment"
+
+  content_type_profile_config {
+    forward_when_content_type_is_unknown = true
+
+    content_type_profiles {
+      items {
+        content_type = "application/x-www-form-urlencoded"
+        format       = "URLEncoded"
+        profile_id   = aws_cloudfront_field_level_encryption_profile.test.id
+      }
+    }
+  }
+
+  query_arg_profile_config {
+    forward_when_query_arg_profile_is_unknown = true
+  }
+}
+`)
+}
+
+func testAccFieldLevelEncryptionConfigConfig_updated(rName string) string {
+	return acctest.ConfigCompose(testAccFieldLevelEncryptionConfig_base(rName), `
+resource "aws_cloudfront_field_level_encryption_config" "test" {
+  comment = "some other comment"
+
+  content_type_profile_config {
+    forward_when_content_type_is_unknown = true
+
+    content_type_profiles {
+      items {
+        content_type = "application/x-www-form-urlencoded"
+        format       = "URLEncoded"
+        profile_id   = aws_cloudfront_field_level_encryption_profile.test.id
+      }
+    }
+  }
+
+  query_arg_profile_config {
+    forward_when_query_arg_profile_is_unknown = false
+
+    query_arg_profiles {
+      items {
+        profile_id = aws_cloudfront_field_level_encryption_profile.test.id
+        query_arg  = "Arg1"
+      }
+
+      items {
+        profile_id = aws_cloudfront_field_level_encryption_profile.test.id
+        query_arg  = "Arg2"
+      }
+    }
+  }
+}
+`)
+}

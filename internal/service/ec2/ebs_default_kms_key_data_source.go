@@ -1,0 +1,52 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+// DONOTCOPY: Copying old resources spreads bad habits. Use skaff instead.
+
+package ec2
+
+import (
+	"context"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-provider-aws/internal/conns"
+	"github.com/hashicorp/terraform-provider-aws/internal/errs/sdkdiag"
+)
+
+// @SDKDataSource("aws_ebs_default_kms_key", name="EBS Default KMS Key")
+func dataSourceEBSDefaultKMSKey() *schema.Resource {
+	return &schema.Resource{
+		ReadWithoutTimeout: dataSourceEBSDefaultKMSKeyRead,
+
+		Timeouts: &schema.ResourceTimeout{
+			Read: schema.DefaultTimeout(20 * time.Minute),
+		},
+
+		SchemaFunc: func() map[string]*schema.Schema {
+			return map[string]*schema.Schema{
+				"key_arn": {
+					Type:     schema.TypeString,
+					Computed: true,
+				},
+			}
+		},
+	}
+}
+func dataSourceEBSDefaultKMSKeyRead(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
+	var diags diag.Diagnostics
+	conn := meta.(*conns.AWSClient).EC2Client(ctx)
+
+	input := ec2.GetEbsDefaultKmsKeyIdInput{}
+	res, err := conn.GetEbsDefaultKmsKeyId(ctx, &input)
+	if err != nil {
+		return sdkdiag.AppendErrorf(diags, "reading EBS default KMS key: %s", err)
+	}
+
+	d.SetId(meta.(*conns.AWSClient).Region(ctx))
+	d.Set("key_arn", res.KmsKeyId)
+
+	return diags
+}

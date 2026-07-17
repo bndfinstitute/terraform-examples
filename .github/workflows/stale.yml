@@ -1,0 +1,34 @@
+# Copyright IBM Corp. 2014, 2026
+# "SPDX-License-Identifier: MPL-2.0"
+
+name: "Stale issues and pull requests"
+on:
+  schedule:
+    - cron: "40 17 * * *"
+
+permissions:
+  issues: write        # required to label and close issues
+  pull-requests: write # required to label and close pull requests
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@1e223db275d687790206a7acac4d1a11bd6fe629 # v10.4.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          days-before-stale: 720
+          days-before-close: 30
+          exempt-issue-labels: 'needs-triage'
+          exempt-pr-labels: 'needs-triage'
+          operations-per-run: 200
+          stale-issue-label: 'stale'
+          stale-issue-message: |
+            Marking this issue as stale due to inactivity. This helps our maintainers find and focus on the active issues. If this issue receives no comments in the next 30 days it will automatically be closed. Maintainers can also remove the stale label.
+
+            If this issue was automatically closed and you feel this issue should be reopened, we encourage creating a new issue linking back to this one for added context. Thank you!
+          stale-pr-label: 'stale'
+          stale-pr-message: |
+            Marking this pull request as stale due to inactivity. This helps our maintainers find and focus on the active pull requests. If this pull request receives no comments in the next 30 days it will automatically be closed. Maintainers can also remove the stale label.
+
+            If this pull request was automatically closed and you feel this pull request should be reopened, we encourage creating a new pull request linking back to this one for added context. Thank you!

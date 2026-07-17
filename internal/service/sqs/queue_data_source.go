@@ -1,0 +1,98 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+// DONOTCOPY: Copying old resources spreads bad habits. Use skaff instead.
+
+package sqs
+
+import (
+	"context"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"github.com/hashicorp/aws-sdk-go-base/v2/tfawserr"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-provider-aws/internal/conns"
+	"github.com/hashicorp/terraform-provider-aws/internal/errs/sdkdiag"
+	"github.com/hashicorp/terraform-provider-aws/internal/retry"
+	tftags "github.com/hashicorp/terraform-provider-aws/internal/tags"
+	"github.com/hashicorp/terraform-provider-aws/internal/tfresource"
+	"github.com/hashicorp/terraform-provider-aws/names"
+)
+
+// @SDKDataSource("aws_sqs_queue", name="Queue")
+// @Tags(identifierAttribute="url")
+func dataSourceQueue() *schema.Resource {
+	return &schema.Resource{
+		ReadWithoutTimeout: dataSourceQueueRead,
+
+		SchemaFunc: func() map[string]*schema.Schema {
+			return map[string]*schema.Schema{
+				names.AttrARN: {
+					Type:     schema.TypeString,
+					Computed: true,
+				},
+				names.AttrName: {
+					Type:     schema.TypeString,
+					Required: true,
+				},
+				names.AttrTags: tftags.TagsSchemaComputed(),
+				names.AttrURL: {
+					Type:     schema.TypeString,
+					Computed: true,
+				},
+			}
+		},
+	}
+}
+
+func dataSourceQueueRead(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
+	var diags diag.Diagnostics
+	conn := meta.(*conns.AWSClient).SQSClient(ctx)
+
+	name := d.Get(names.AttrName).(string)
+	urlOutput, err := findQueueURLByName(ctx, conn, name)
+
+	if err != nil {
+		return sdkdiag.AppendErrorf(diags, "reading SQS Queue (%s) URL: %s", name, err)
+	}
+
+	queueURL := aws.ToString(urlOutput)
+	attributesOutput, err := findQueueAttributeByTwoPartKey(ctx, conn, queueURL, types.QueueAttributeNameQueueArn)
+
+	if err != nil {
+		return sdkdiag.AppendErrorf(diags, "reading SQS Queue (%s) ARN attribute: %s", queueURL, err)
+	}
+
+	d.SetId(queueURL)
+	d.Set(names.AttrARN, attributesOutput)
+	d.Set(names.AttrURL, queueURL)
+
+	return diags
+}
+
+func findQueueURLByName(ctx context.Context, conn *sqs.Client, name string) (*string, error) {
+	input := &sqs.GetQueueUrlInput{
+		QueueName: aws.String(name),
+	}
+
+	output, err := conn.GetQueueUrl(ctx, input)
+
+	if tfawserr.ErrCodeEquals(err, errCodeQueueDoesNotExist) {
+		return nil, &retry.NotFoundError{
+			LastError: err,
+		}
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	if output == nil || output.QueueUrl == nil {
+		return nil, tfresource.NewEmptyResultError()
+	}
+
+	return output.QueueUrl, nil
+}

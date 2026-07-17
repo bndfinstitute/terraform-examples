@@ -1,0 +1,59 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+// DONOTCOPY: Copying old resources spreads bad habits. Use skaff instead.
+
+package ses
+
+import (
+	"context"
+	"strings"
+
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-provider-aws/internal/conns"
+	"github.com/hashicorp/terraform-provider-aws/internal/errs/sdkdiag"
+	"github.com/hashicorp/terraform-provider-aws/names"
+)
+
+// @SDKDataSource("aws_ses_email_identity", name="Email Identity")
+func dataSourceEmailIdentity() *schema.Resource {
+	return &schema.Resource{
+		ReadWithoutTimeout: dataSourceEmailIdentityRead,
+
+		SchemaFunc: func() map[string]*schema.Schema {
+			return map[string]*schema.Schema{
+				names.AttrARN: {
+					Type:     schema.TypeString,
+					Computed: true,
+				},
+				names.AttrEmail: {
+					Type:     schema.TypeString,
+					Required: true,
+					StateFunc: func(v any) string {
+						return strings.TrimSuffix(v.(string), ".")
+					},
+				},
+			}
+		},
+	}
+}
+
+func dataSourceEmailIdentityRead(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
+	var diags diag.Diagnostics
+	c := meta.(*conns.AWSClient)
+	conn := c.SESClient(ctx)
+
+	email := strings.TrimSuffix(d.Get(names.AttrEmail).(string), ".")
+	_, err := findIdentityNotificationAttributesByIdentity(ctx, conn, email)
+
+	if err != nil {
+		return sdkdiag.AppendErrorf(diags, "reading SES Email Identity (%s) verification: %s", email, err)
+	}
+
+	d.SetId(email)
+	d.Set(names.AttrARN, identityARN(ctx, c, email))
+	d.Set(names.AttrEmail, email)
+
+	return diags
+}

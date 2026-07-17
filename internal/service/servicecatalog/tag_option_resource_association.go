@@ -1,0 +1,185 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+// DONOTCOPY: Copying old resources spreads bad habits. Use skaff instead.
+
+package servicecatalog
+
+import (
+	"context"
+	"log"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/servicecatalog"
+	awstypes "github.com/aws/aws-sdk-go-v2/service/servicecatalog/types"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-provider-aws/internal/conns"
+	"github.com/hashicorp/terraform-provider-aws/internal/errs"
+	"github.com/hashicorp/terraform-provider-aws/internal/errs/sdkdiag"
+	"github.com/hashicorp/terraform-provider-aws/internal/retry"
+	"github.com/hashicorp/terraform-provider-aws/internal/tfresource"
+	"github.com/hashicorp/terraform-provider-aws/names"
+)
+
+// @SDKResource("aws_servicecatalog_tag_option_resource_association", name="Tag Option Resource Association")
+func resourceTagOptionResourceAssociation() *schema.Resource {
+	return &schema.Resource{
+		CreateWithoutTimeout: resourceTagOptionResourceAssociationCreate,
+		ReadWithoutTimeout:   resourceTagOptionResourceAssociationRead,
+		DeleteWithoutTimeout: resourceTagOptionResourceAssociationDelete,
+		Importer: &schema.ResourceImporter{
+			StateContext: schema.ImportStatePassthroughContext,
+		},
+
+		Timeouts: &schema.ResourceTimeout{
+			Create: schema.DefaultTimeout(TagOptionResourceAssociationReadyTimeout),
+			Read:   schema.DefaultTimeout(TagOptionResourceAssociationReadTimeout),
+			Delete: schema.DefaultTimeout(TagOptionResourceAssociationDeleteTimeout),
+		},
+
+		SchemaFunc: func() map[string]*schema.Schema {
+			return map[string]*schema.Schema{
+				names.AttrResourceARN: {
+					Type:     schema.TypeString,
+					Computed: true,
+				},
+				"resource_created_time": {
+					Type:     schema.TypeString,
+					Computed: true,
+				},
+				"resource_description": {
+					Type:     schema.TypeString,
+					Computed: true,
+				},
+				names.AttrResourceID: {
+					Type:     schema.TypeString,
+					Required: true,
+					ForceNew: true,
+				},
+				"resource_name": {
+					Type:     schema.TypeString,
+					Computed: true,
+				},
+				"tag_option_id": {
+					Type:     schema.TypeString,
+					Required: true,
+					ForceNew: true,
+				},
+			}
+		},
+	}
+}
+
+func resourceTagOptionResourceAssociationCreate(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
+	var diags diag.Diagnostics
+	conn := meta.(*conns.AWSClient).ServiceCatalogClient(ctx)
+
+	input := &servicecatalog.AssociateTagOptionWithResourceInput{
+		ResourceId:  aws.String(d.Get(names.AttrResourceID).(string)),
+		TagOptionId: aws.String(d.Get("tag_option_id").(string)),
+	}
+
+	var output *servicecatalog.AssociateTagOptionWithResourceOutput
+	err := tfresource.Retry(ctx, d.Timeout(schema.TimeoutCreate), func(ctx context.Context) *tfresource.RetryError {
+		var err error
+
+		output, err = conn.AssociateTagOptionWithResource(ctx, input)
+
+		if errs.IsAErrorMessageContains[*awstypes.InvalidParametersException](err, "profile does not exist") {
+			return tfresource.RetryableError(err)
+		}
+
+		if err != nil {
+			return tfresource.NonRetryableError(err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return sdkdiag.AppendErrorf(diags, "associating Service Catalog Tag Option with Resource: %s", err)
+	}
+
+	if output == nil {
+		return sdkdiag.AppendErrorf(diags, "creating Service Catalog Tag Option Resource Association: empty response")
+	}
+
+	d.SetId(tagOptionResourceAssociationID(d.Get("tag_option_id").(string), d.Get(names.AttrResourceID).(string)))
+
+	return append(diags, resourceTagOptionResourceAssociationRead(ctx, d, meta)...)
+}
+
+func resourceTagOptionResourceAssociationRead(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
+	var diags diag.Diagnostics
+	conn := meta.(*conns.AWSClient).ServiceCatalogClient(ctx)
+
+	tagOptionID, resourceID, err := tagOptionResourceAssociationParseID(d.Id())
+
+	if err != nil {
+		return sdkdiag.AppendErrorf(diags, "could not parse ID (%s): %s", d.Id(), err)
+	}
+
+	output, err := waitTagOptionResourceAssociationReady(ctx, conn, tagOptionID, resourceID, d.Timeout(schema.TimeoutRead))
+
+	if !d.IsNewResource() && retry.NotFound(err) {
+		log.Printf("[WARN] Service Catalog Tag Option Resource Association (%s) not found, removing from state", d.Id())
+		d.SetId("")
+		return diags
+	}
+
+	if err != nil {
+		return sdkdiag.AppendErrorf(diags, "describing Service Catalog Tag Option Resource Association (%s): %s", d.Id(), err)
+	}
+
+	if output == nil {
+		return sdkdiag.AppendErrorf(diags, "getting Service Catalog Tag Option Resource Association (%s): empty response", d.Id())
+	}
+
+	if output.CreatedTime != nil {
+		d.Set("resource_created_time", output.CreatedTime.Format(time.RFC3339))
+	}
+
+	d.Set(names.AttrResourceARN, output.ARN)
+	d.Set("resource_description", output.Description)
+	d.Set(names.AttrResourceID, output.Id)
+	d.Set("resource_name", output.Name)
+	d.Set("tag_option_id", tagOptionID)
+
+	return diags
+}
+
+func resourceTagOptionResourceAssociationDelete(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
+	var diags diag.Diagnostics
+	conn := meta.(*conns.AWSClient).ServiceCatalogClient(ctx)
+
+	tagOptionID, resourceID, err := tagOptionResourceAssociationParseID(d.Id())
+
+	if err != nil {
+		return sdkdiag.AppendErrorf(diags, "could not parse ID (%s): %s", d.Id(), err)
+	}
+
+	input := &servicecatalog.DisassociateTagOptionFromResourceInput{
+		ResourceId:  aws.String(resourceID),
+		TagOptionId: aws.String(tagOptionID),
+	}
+
+	_, err = conn.DisassociateTagOptionFromResource(ctx, input)
+
+	if errs.IsA[*awstypes.ResourceNotFoundException](err) {
+		return diags
+	}
+
+	if err != nil {
+		return sdkdiag.AppendErrorf(diags, "disassociating Service Catalog Tag Option from Resource (%s): %s", d.Id(), err)
+	}
+
+	err = waitTagOptionResourceAssociationDeleted(ctx, conn, tagOptionID, resourceID, d.Timeout(schema.TimeoutDelete))
+
+	if err != nil && !retry.NotFound(err) {
+		return sdkdiag.AppendErrorf(diags, "waiting for Service Catalog Tag Option Resource Disassociation (%s): %s", d.Id(), err)
+	}
+
+	return diags
+}

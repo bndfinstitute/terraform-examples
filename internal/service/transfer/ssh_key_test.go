@@ -1,0 +1,198 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: MPL-2.0
+
+package transfer_test
+
+import (
+	"context"
+	"fmt"
+	"testing"
+
+	awstypes "github.com/aws/aws-sdk-go-v2/service/transfer/types"
+	sdkacctest "github.com/hashicorp/terraform-plugin-testing/helper/acctest"
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-provider-aws/internal/acctest"
+	"github.com/hashicorp/terraform-provider-aws/internal/retry"
+	tftransfer "github.com/hashicorp/terraform-provider-aws/internal/service/transfer"
+	"github.com/hashicorp/terraform-provider-aws/names"
+)
+
+func testAccSSHKey_basic(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.SshPublicKey
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_transfer_ssh_key.test"
+	publicKey, _, err := sdkacctest.RandSSHKeyPair(acctest.DefaultEmailAddress)
+	if err != nil {
+		t.Fatalf("error generating random SSH key: %s", err)
+	}
+
+	acctest.Test(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); testAccPreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.TransferServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckSSHKeyDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccSSHKeyConfig_basic(rName, publicKey),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckSSHKeyExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, "body", publicKey),
+					resource.TestCheckResourceAttrPair(resourceName, "server_id", "aws_transfer_server.test", names.AttrID),
+					resource.TestCheckResourceAttrSet(resourceName, "ssh_key_id"),
+					resource.TestCheckResourceAttrPair(resourceName, names.AttrUserName, "aws_transfer_user.test", names.AttrUserName),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+		},
+	})
+}
+
+func testAccSSHKey_disappears(t *testing.T) {
+	ctx := acctest.Context(t)
+	var conf awstypes.SshPublicKey
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	resourceName := "aws_transfer_ssh_key.test"
+	publicKey, _, err := sdkacctest.RandSSHKeyPair(acctest.DefaultEmailAddress)
+	if err != nil {
+		t.Fatalf("error generating random SSH key: %s", err)
+	}
+
+	acctest.Test(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t); testAccPreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.TransferServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckSSHKeyDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccSSHKeyConfig_basic(rName, publicKey),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckSSHKeyExists(ctx, t, resourceName, &conf),
+					acctest.CheckSDKResourceDisappears(ctx, t, tftransfer.ResourceSSHKey(), resourceName),
+				),
+				ExpectNonEmptyPlan: true,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+					PostApplyPostRefresh: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate),
+					},
+				},
+			},
+		},
+	})
+}
+
+func testAccCheckSSHKeyExists(ctx context.Context, t *testing.T, n string, v *awstypes.SshPublicKey) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[n]
+		if !ok {
+			return fmt.Errorf("Not found: %s", n)
+		}
+
+		conn := acctest.ProviderMeta(ctx, t).TransferClient(ctx)
+
+		_, output, err := tftransfer.FindUserSSHKeyByThreePartKey(ctx, conn, rs.Primary.Attributes["server_id"], rs.Primary.Attributes[names.AttrUserName], rs.Primary.Attributes["ssh_key_id"])
+
+		if err != nil {
+			return err
+		}
+
+		*v = *output
+
+		return nil
+	}
+}
+
+func testAccCheckSSHKeyDestroy(ctx context.Context, t *testing.T) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		conn := acctest.ProviderMeta(ctx, t).TransferClient(ctx)
+
+		for _, rs := range s.RootModule().Resources {
+			if rs.Type != "aws_transfer_ssh_key" {
+				continue
+			}
+
+			_, _, err := tftransfer.FindUserSSHKeyByThreePartKey(ctx, conn, rs.Primary.Attributes["server_id"], rs.Primary.Attributes[names.AttrUserName], rs.Primary.Attributes["ssh_key_id"])
+
+			if retry.NotFound(err) {
+				continue
+			}
+
+			if err != nil {
+				return err
+			}
+
+			return fmt.Errorf("Transfer SSH Key %s still exists", rs.Primary.ID)
+		}
+
+		return nil
+	}
+}
+
+func testAccSSHKeyConfig_basic(rName, publicKey string) string {
+	return fmt.Sprintf(`
+resource "aws_transfer_server" "test" {
+  identity_provider_type = "SERVICE_MANAGED"
+}
+
+resource "aws_iam_role" "test" {
+  name = %[1]q
+
+  assume_role_policy = <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "transfer.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+}
+
+resource "aws_iam_role_policy" "test" {
+  name = %[1]q
+  role = aws_iam_role.test.id
+
+  policy = <<POLICY
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowFullAccesstoS3",
+      "Effect": "Allow",
+      "Action": [
+        "s3:*"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+POLICY
+}
+
+resource "aws_transfer_user" "test" {
+  server_id = aws_transfer_server.test.id
+  user_name = "tftestuser"
+  role      = aws_iam_role.test.arn
+}
+
+resource "aws_transfer_ssh_key" "test" {
+  server_id = aws_transfer_server.test.id
+  user_name = aws_transfer_user.test.user_name
+  body      = "%[2]s"
+}
+`, rName, publicKey)
+}
