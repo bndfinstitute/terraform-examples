@@ -41,12 +41,12 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/auditmanager v1.48.1
 	github.com/aws/aws-sdk-go-v2/service/autoscaling v1.69.1
 	github.com/aws/aws-sdk-go-v2/service/autoscalingplans v1.32.1
-	github.com/aws/aws-sdk-go-v2/service/backup v1.58.1
+	github.com/aws/aws-sdk-go-v2/service/backup v1.58.2
 	github.com/aws/aws-sdk-go-v2/service/batch v1.67.1
 	github.com/aws/aws-sdk-go-v2/service/bcmdataexports v1.17.1
 	github.com/aws/aws-sdk-go-v2/service/bedrock v1.65.1
 	github.com/aws/aws-sdk-go-v2/service/bedrockagent v1.57.1
-	github.com/aws/aws-sdk-go-v2/service/bedrockagentcorecontrol v1.48.0
+	github.com/aws/aws-sdk-go-v2/service/bedrockagentcorecontrol v1.49.0
 	github.com/aws/aws-sdk-go-v2/service/billing v1.12.1
 	github.com/aws/aws-sdk-go-v2/service/budgets v1.45.1
 	github.com/aws/aws-sdk-go-v2/service/chatbot v1.16.1
@@ -76,7 +76,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/codestarconnections v1.37.1
 	github.com/aws/aws-sdk-go-v2/service/codestarnotifications v1.33.1
 	github.com/aws/aws-sdk-go-v2/service/cognitoidentity v1.35.1
-	github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider v1.64.1
+	github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider v1.65.0
 	github.com/aws/aws-sdk-go-v2/service/comprehend v1.42.1
 	github.com/aws/aws-sdk-go-v2/service/computeoptimizer v1.56.0
 	github.com/aws/aws-sdk-go-v2/service/configservice v1.67.1
@@ -120,7 +120,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/elastictranscoder v1.33.0
 	github.com/aws/aws-sdk-go-v2/service/emr v1.63.0
 	github.com/aws/aws-sdk-go-v2/service/emrcontainers v1.43.0
-	github.com/aws/aws-sdk-go-v2/service/emrserverless v1.43.1
+	github.com/aws/aws-sdk-go-v2/service/emrserverless v1.43.2
 	github.com/aws/aws-sdk-go-v2/service/eventbridge v1.47.1
 	github.com/aws/aws-sdk-go-v2/service/evidently v1.30.0
 	github.com/aws/aws-sdk-go-v2/service/evs v1.12.1
@@ -136,7 +136,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/grafana v1.37.1
 	github.com/aws/aws-sdk-go-v2/service/greengrass v1.34.1
 	github.com/aws/aws-sdk-go-v2/service/groundstation v1.44.1
-	github.com/aws/aws-sdk-go-v2/service/guardduty v1.83.0
+	github.com/aws/aws-sdk-go-v2/service/guardduty v1.83.1
 	github.com/aws/aws-sdk-go-v2/service/healthlake v1.41.0
 	github.com/aws/aws-sdk-go-v2/service/iam v1.55.1
 	github.com/aws/aws-sdk-go-v2/service/identitystore v1.38.1
@@ -155,7 +155,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/keyspaces v1.27.1
 	github.com/aws/aws-sdk-go-v2/service/kinesis v1.45.1
 	github.com/aws/aws-sdk-go-v2/service/kinesisanalytics v1.32.1
-	github.com/aws/aws-sdk-go-v2/service/kinesisanalyticsv2 v1.39.1
+	github.com/aws/aws-sdk-go-v2/service/kinesisanalyticsv2 v1.40.0
 	github.com/aws/aws-sdk-go-v2/service/kinesisvideo v1.35.1
 	github.com/aws/aws-sdk-go-v2/service/kms v1.54.1
 	github.com/aws/aws-sdk-go-v2/service/lakeformation v1.49.1
@@ -192,10 +192,10 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/notificationscontacts v1.7.1
 	github.com/aws/aws-sdk-go-v2/service/oam v1.25.1
 	github.com/aws/aws-sdk-go-v2/service/observabilityadmin v1.19.1
-	github.com/aws/aws-sdk-go-v2/service/odb v1.13.1
+	github.com/aws/aws-sdk-go-v2/service/odb v1.14.0
 	github.com/aws/aws-sdk-go-v2/service/opensearch v1.74.1
 	github.com/aws/aws-sdk-go-v2/service/opensearchserverless v1.33.1
-	github.com/aws/aws-sdk-go-v2/service/organizations v1.52.1
+	github.com/aws/aws-sdk-go-v2/service/organizations v1.52.2
 	github.com/aws/aws-sdk-go-v2/service/osis v1.23.1
 	github.com/aws/aws-sdk-go-v2/service/outposts v1.64.1
 	github.com/aws/aws-sdk-go-v2/service/paymentcryptography v1.32.1
@@ -208,10 +208,10 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/pricing v1.43.1
 	github.com/aws/aws-sdk-go-v2/service/qbusiness v1.36.1
 	github.com/aws/aws-sdk-go-v2/service/qldb v1.32.2
-	github.com/aws/aws-sdk-go-v2/service/quicksight v1.118.1
+	github.com/aws/aws-sdk-go-v2/service/quicksight v1.119.0
 	github.com/aws/aws-sdk-go-v2/service/ram v1.38.1
 	github.com/aws/aws-sdk-go-v2/service/rbin v1.29.1
-	github.com/aws/aws-sdk-go-v2/service/rds v1.121.0
+	github.com/aws/aws-sdk-go-v2/service/rds v1.122.0
 	github.com/aws/aws-sdk-go-v2/service/rdsdata v1.34.1
 	github.com/aws/aws-sdk-go-v2/service/redshift v1.64.2
 	github.com/aws/aws-sdk-go-v2/service/redshiftdata v1.41.1
@@ -248,7 +248,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/servicediscovery v1.42.0
 	github.com/aws/aws-sdk-go-v2/service/servicequotas v1.36.1
 	github.com/aws/aws-sdk-go-v2/service/ses v1.36.1
-	github.com/aws/aws-sdk-go-v2/service/sesv2 v1.63.1
+	github.com/aws/aws-sdk-go-v2/service/sesv2 v1.64.0
 	github.com/aws/aws-sdk-go-v2/service/sfn v1.44.1
 	github.com/aws/aws-sdk-go-v2/service/shield v1.36.1
 	github.com/aws/aws-sdk-go-v2/service/signer v1.34.1
